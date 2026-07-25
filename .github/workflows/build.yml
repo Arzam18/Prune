@@ -39,19 +39,31 @@ jobs:
             ./permute pulsar.bin model.bin
           fi
 
-          # 3. Pre-generate embeder.cpp and patch it immediately
+          # 3. Create a custom Python/Perl/Sed script or inline generator to completely bypass 
+          # the buggy assembly alignment in embeder.cpp by overriding how embeder.o is built.
+          # Instead of relying on Makefile rules, we directly compile embeder.cpp with sed pre-applied.
+          
+          # Force generation of embeder.cpp
           make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
+
           if [ -f "embeder.cpp" ]; then
             sed -i 's/\.align 64/\.align 6/g' embeder.cpp
+            sed -i 's/\.align 32/\.align 5/g' embeder.cpp
+            sed -i 's/\.align 16/\.align 4/g' embeder.cpp
           fi
 
-          # 4. Modify the Makefile itself to permanently strip out any dynamic regeneration 
-          # of embeder.cpp that triggers during 'make prune'
+          # Compile embeder.o manually using the NDK toolchain with the patch securely in place
+          "$NDK_CXX" -Werror -Wshadow -Wall -Wextra -MMD -std=gnu++17 -I../Fathom/src \
+            -fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument \
+            -O3 -march=armv8-a \
+            -c -o embeder.o embeder.cpp
+
+          # 4. Strip embeder.cpp and embeder.o references from Makefile so it never tries to touch them again
           if [ -f "Makefile" ]; then
-            sed -i '/embeder.cpp/d' Makefile || true
+            sed -i '/embeder/d' Makefile || true
           fi
 
-          # 5. Build the actual Android ARM64 engine using the NDK toolchain
+          # 5. Build the rest of the project and link everything including our pre-compiled embeder.o
           make prune \
             CXX="$NDK_CXX" \
             CC="$NDK_CC" \
@@ -59,7 +71,7 @@ jobs:
             CPUSET=unknow \
             OPT="-O3 -flto" \
             ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" \
-            LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread"
+            LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread embeder.o"
 
           VERSION=$(git rev-parse --short HEAD)
           mkdir -p ../artifacts
