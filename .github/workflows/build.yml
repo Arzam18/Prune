@@ -33,7 +33,7 @@ jobs:
           # 1. Build permute natively on host
           make permute CXX=g++ ARCH=native OPT="-O3"
 
-          # 2. Explicitly download pulsar.bin to avoid Makefile download issues
+          # 2. Download pulsar.bin network weights
           echo "Downloading pulsar.bin network weights..."
           curl -L -o pulsar.bin https://github.com/dseaman/Prune/releases/download/net/pulsar.bin
 
@@ -45,10 +45,10 @@ jobs:
             exit 1
           fi
 
-          # 4. Force generation of embeder.cpp so we can patch its alignment instruction
-          make embeder.o CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
+          # 4. Generate embeder.cpp via the standard make target now that model.bin exists
+          make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
 
-          # Patch .align 64 to .align 6 for ARM64 GNU assembler compatibility
+          # If embeder.cpp was generated, patch .align 64 to .align 6 for ARM64 GNU assembler compatibility
           if [ -f "embeder.cpp" ]; then
             sed -i 's/\.align 64/\.align 6/g' embeder.cpp
           fi
