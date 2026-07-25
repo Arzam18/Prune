@@ -33,23 +33,34 @@ jobs:
           # 1. Build permute natively on host
           make permute CXX=g++ ARCH=native OPT="-O3"
 
-          # 2. Use the Makefile's native network download/model generation target cleanly
-          make model.bin CXX=g++ ARCH=native OPT="-O3" || true
-
-          # If model.bin wasn't created via make, use permute manually
-          if [ ! -f "model.bin" ] && [ -f "pulsar.bin" ]; then
+          # 2. Download and generate model.bin
+          curl -L -o pulsar.bin https://github.com/dseaman/Prune/releases/download/net/pulsar.bin
+          if [ -f "pulsar.bin" ]; then
             ./permute pulsar.bin model.bin
+          else
+            echo "ERROR: pulsar.bin download failed!"
+            exit 1
           fi
 
-          # 3. Trigger a dummy compilation dry-run or target that triggers embeder.cpp generation
-          # (The Makefile generates embeder.cpp dynamically when compiling embeder.o)
-          make embeder.o \
+          # 3. Force generation of embeder.cpp via the NDK compiler target
+          make embeder.cpp \
             CXX="$NDK_CXX" \
             CC="$NDK_CC" \
             ARCH=armv8-a \
             CPUSET=unknow \
             OPT="-O3" \
             ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" || true
+
+          # If embeder.cpp wasn't generated as a standalone file, force it via embeder.o compilation
+          if [ ! -f "embeder.cpp" ]; then
+            make embeder.o \
+              CXX="$NDK_CXX" \
+              CC="$NDK_CC" \
+              ARCH=armv8-a \
+              CPUSET=unknow \
+              OPT="-O3" \
+              ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" || true
+          fi
 
           # 4. Patch .align 64 to .align 6 in embeder.cpp for ARM64 GNU assembler compatibility
           if [ -f "embeder.cpp" ]; then
@@ -60,10 +71,7 @@ jobs:
             exit 1
           fi
 
-          # 5. Clean object files to ensure clean build with the patched embeder.cpp
-          make clean || true
-
-          # 6. Build the actual Android ARM64 engine using the NDK toolchain
+          # 5. Build the actual Android ARM64 engine using the NDK toolchain (DO NOT run make clean!)
           make prune \
             CXX="$NDK_CXX" \
             CC="$NDK_CC" \
