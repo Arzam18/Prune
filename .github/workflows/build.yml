@@ -1,101 +1,113 @@
-name: Build Prune Android Pre-Release
+name: Prune Android Build
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    types:
-      - closed
   workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
 
 permissions:
   contents: write
 
 jobs:
-  build-android:
-    if: |
-      github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main')
-    runs-on: ubuntu-latest
-
+  build:
+    name: Prune Android
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - name: Build Prune UCI for Android ARM64
-        working-directory: ./core
-        run: |
-          NDK_CXX="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++"
-          NDK_CC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
+    - name: Clone Repository
+      uses: actions/checkout@v4
 
-          # 1. Build permute natively on host
-          make permute CXX=g++ ARCH=native OPT="-O3"
+    - name: Set up Android NDK & QEMU Environment
+      run: |
+        sudo apt update && sudo apt install -y qemu-user
+        NDKV="27.2.12479018"
+        ANDROID_ROOT=/usr/local/lib/android
+        ANDROID_SDK_ROOT=$ANDROID_ROOT/sdk
+        SDKMANAGER=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager
+        echo "y" | $SDKMANAGER "ndk;$NDKV"
+        ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDKV
+        ANDROID_NDK_BIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+        
+        # Set NDK Toolchain Environment Variables
+        echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
+        echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> $GITHUB_ENV
 
-          # 2. Download and generate model.bin
-          make model.bin CXX=g++ ARCH=native OPT="-O3" || true
-          if [ -f "pulsar.bin" ] && [ ! -f "model.bin" ]; then
-            ./permute pulsar.bin model.bin
-          fi
+    - name: Download sse2neon Header
+      run: |
+        # Download into both root and core directories to ensure the compiler finds it regardless of relative includes
+        curl -sL https://raw.githubusercontent.com/DLTcollab/sse2neon/master/sse2neon.h -o sse2neon.h
+        mkdir -p core && cp sse2neon.h core/
 
-          # 3. Clean compile all source files directly with NDK clang++
-          echo "Compiling sources for Android ARM64..."
-          OBJECTS=""
-          for src in *.cpp; do
-            if [ "$src" = "permute.cpp" ]; then
-              continue
-            fi
-            obj="${src%.cpp}.o"
-            echo "Compiling $src -> $obj"
-            "$NDK_CXX" -std=gnu++17 -O3 -march=armv8-a -fPIE -D__ARM_NEON__ \
-              -Wno-unused-command-line-argument -c -o "$obj" "$src" || true
-            if [ -f "$obj" ]; then
-              OBJECTS="$OBJECTS $obj"
-            fi
-          done
+    - name: Patch SIMD Headers for ARM64 Cross-Compilation
+      run: |
+        cat << 'EOF' > patch_simd.py
+        import os
+        import re
 
-          # 4. Link everything into the final binary
-          echo "Linking final executable..."
-          "$NDK_CXX" -pie -static-libstdc++ -lpthread $OBJECTS -o prune
+        def patch_file(path):
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
 
-          VERSION=$(git rev-parse --short HEAD)
-          mkdir -p ../artifacts
-          if [ -f "prune" ]; then
-            cp "prune" ../artifacts/Prune-${VERSION}-android-arm64
-          else
-            echo "ERROR: Prune executable not found!"
-            exit 1
-          fi
+            original = content
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: prune-android
-          path: core/../artifacts/*
+            # Safely replace the entire #include <immintrin.h> directive
+            if "<immintrin.h>" in content:
+                replacement = """#if defined(__aarch64__) || defined(__ARM_NEON)
+        #include "sse2neon.h"
+        #else
+        #include <immintrin.h>
+        #endif"""
+                content = re.sub(r'#include\s*<immintrin\.h>', replacement, content)
 
-  publish-prerelease:
-    needs:
-      - build-android
-    runs-on: ubuntu-latest
+            if content != original:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"Patched: {path}")
 
-    steps:
-      - uses: actions/checkout@v4
+        for root, dirs, files in os.walk("."):
+            for file in files:
+                if file.endswith((".h", ".hpp", ".cpp", ".c")):
+                    patch_file(os.path.join(root, file))
+        EOF
+        python3 patch_simd.py
 
-      - uses: actions/download-artifact@v4
-        with:
-          path: release-assets
+    - name: Compile Prune for Android (aarch64)
+      run: |
+        export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
+        
+        # Prune's architecture requires running Make inside the core/ directory
+        cd core || true
+        
+        # Compile targeting Android ARM64 using NDK Clang with sse2neon integration
+        make prune \
+          CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
+          ARCH="-march=armv8-a" \
+          CXXFLAGS="-O3 -march=armv8-a -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread" \
+          LDFLAGS="-fuse-ld=lld -static-libstdc++"
+          
+        # Move binary out to the root directory for benchmarking and artifacts
+        mv prune ../prune-android-arm64 || true
+        cd ..
 
-      - name: Publish prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete pre-release --yes --cleanup-tag || true
-          gh release create pre-release \
-            --title "Prune Android Pre-Release" \
-            --prerelease \
-            release-assets/prune-android/*
+    - name: Bench
+      run: |
+        # Prune's bench command tests 48 positions
+        qemu-aarch64 ./prune-android-arm64 bench || true
 
-      - name: Clean up Android artifact
-        uses: geekyeggo/delete-artifact@v5
-        with:
-          name: prune-android
+    - name: Upload Binary Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: prune-android-arm64
+        path: ./prune-android-arm64
+
+    - name: Create GitHub Prerelease
+      if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: android-build-${{ github.run_number }}
+        name: Prune Android Build ${{ github.run_number }}
+        prerelease: true
+        files: ./prune-android-arm64
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
