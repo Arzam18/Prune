@@ -77,10 +77,23 @@ jobs:
         #endif"""
             content = re.sub(r'#include\s*<[a-zA-Z0-9_]*intrin\.h>', replacement, content)
 
-            # If this is simd_definitions.hpp, force sse2neon inclusion at the top to protect helper tools like permute
+            # If this is simd_definitions.hpp, force sse2neon and SSE definitions at the top for helper tools like permute
             if "simd_definitions.hpp" in path:
-                if '#include "sse2neon.h"' not in content:
-                    content = '#if defined(__aarch64__) || defined(__ARM_NEON)\n#include "sse2neon.h"\n#endif\n' + content
+                header_injection = """#if defined(__aarch64__) || defined(__ARM_NEON)
+        #ifndef __SSE2__
+        #define __SSE2__ 1
+        #endif
+        #ifndef __SSSE3__
+        #define __SSSE3__ 1
+        #endif
+        #ifndef __SSE4_1__
+        #define __SSE4_1__ 1
+        #endif
+        #include "sse2neon.h"
+        #endif
+        """
+                if 'sse2neon.h' not in content:
+                    content = header_injection + content
 
             # Bypass the strict SIMD #error guard in simd_definitions.hpp
             if "This code requires at least SSE2 (x86) or NEON (ARM) support" in content:
@@ -88,6 +101,14 @@ jobs:
                     '#error "This code requires at least SSE2 (x86) or NEON (ARM) support"',
                     '// #error "Bypassed for Android cross-compilation"'
                 )
+
+            # Ensure _simd fallback exists if still undefined
+            if "using simd = _simd;" in content:
+                simd_fallback = """#ifndef _simd
+        #define _simd __m128i
+        #endif
+        using simd = _simd;"""
+                content = content.replace("using simd = _simd;", simd_fallback)
 
             # Remove incompatible -m64 flags from Makefiles during cross-compilation
             if path.endswith("Makefile") or "Makefile" in os.path.basename(path):
@@ -105,7 +126,6 @@ jobs:
         EOF
         python3 patch_simd.py
         # Copy updated headers into core directory
-        cp core/simd_definitions.hpp core/simd_definitions.hpp.bak || true
         cp simd_definitions.hpp core/ 2>/dev/null || true
 
     - name: Compile Prune for Android (aarch64)
