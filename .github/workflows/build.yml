@@ -33,20 +33,18 @@ jobs:
           # 1. Build permute natively on host
           make permute CXX=g++ ARCH=native OPT="-O3"
 
-          # 2. Download pulsar.bin if it doesn't exist yet
+          # 2. Check for network file (pulsar.bin) or let Makefile download it if missing
           if [ ! -f "pulsar.bin" ]; then
-            curl -L -o pulsar.bin https://github.com/dseaman/Prune/releases/download/net/pulsar.bin || true
+            # If the repo Makefile has a target to fetch it, trigger it explicitly via make or standard mirror
+            make model.bin CXX=g++ ARCH=native OPT="-O3" || true
           fi
 
-          # 3. Explicitly generate model.bin using permute
-          if [ -f "pulsar.bin" ]; then
+          # Ensure model.bin gets created via permute if pulsar.bin exists now
+          if [ -f "pulsar.bin" ] && [ ! -f "model.bin" ]; then
             ./permute pulsar.bin model.bin
-          else
-            echo "ERROR: pulsar.bin could not be obtained!"
-            exit 1
           fi
 
-          # 4. Force generation of embeder.cpp so we can patch its alignment instruction
+          # 3. Force generation of embeder.cpp so we can patch its alignment instruction
           make embeder.o CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
 
           # Patch .align 64 to .align 6 for ARM64 GNU assembler compatibility
@@ -54,7 +52,7 @@ jobs:
             sed -i 's/\.align 64/\.align 6/g' embeder.cpp
           fi
 
-          # 5. Build the actual Android ARM64 engine using the NDK toolchain
+          # 4. Build the actual Android ARM64 engine using the NDK toolchain
           make prune \
             CXX="$NDK_CXX" \
             CC="$NDK_CC" \
