@@ -33,10 +33,28 @@ jobs:
         echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
         echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> $GITHUB_ENV
 
-    - name: Download sse2neon Header
+    - name: Download and Patch sse2neon Header
       run: |
-        # Download into both root and core directories to ensure the compiler finds it
         curl -sL https://raw.githubusercontent.com/DLTcollab/sse2neon/master/sse2neon.h -o sse2neon.h
+        
+        # Patch sse2neon.h to remove the unused 'bound' parameter names to satisfy -Werror
+        python3 -c '
+        with open("sse2neon.h", "r", encoding="utf-8") as f:
+            content = f.read()
+
+        content = content.replace(
+            "static uint16_t _sse2neon_aggregate_equal_ordered_8x16(int bound,",
+            "static uint16_t _sse2neon_aggregate_equal_ordered_8x16(int,"
+        )
+        content = content.replace(
+            "static uint16_t _sse2neon_aggregate_equal_ordered_16x8(int bound,",
+            "static uint16_t _sse2neon_aggregate_equal_ordered_16x8(int,"
+        )
+
+        with open("sse2neon.h", "w", encoding="utf-8") as f:
+            f.write(content)
+        print("Patched sse2neon.h successfully!")
+        '
         mkdir -p core && cp sse2neon.h core/
 
     - name: Patch SIMD Headers for ARM64 Cross-Compilation
@@ -79,11 +97,10 @@ jobs:
         cd core || true
         
         # Compile targeting Android ARM64
-        # Added -Wno-unused-parameter to prevent sse2neon warnings from failing the build
         make prune \
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
           ARCH="armv8-a" \
-          CXXFLAGS="-O3 -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread -D__SSE4_1__ -D__SSSE3__ -D__SSE2__ -include sse2neon.h -Wno-unused-parameter" \
+          CXXFLAGS="-O3 -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread -D__SSE4_1__ -D__SSSE3__ -D__SSE2__ -include sse2neon.h" \
           LDFLAGS="-fuse-ld=lld -static-libstdc++"
           
         # Move binary out to the root directory for benchmarking and artifacts
