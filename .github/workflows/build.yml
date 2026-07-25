@@ -39,35 +39,24 @@ jobs:
             ./permute pulsar.bin model.bin
           fi
 
-          # 3. Create a wrapper script for the compiler/assembler that automatically 
-          # fixes any .align 64 / .align 32 instructions in assembly files on-the-fly!
-          cat << 'EOF' > wrapper.py
-          import sys
-          import subprocess
+          # 3. Force creation of embeder.cpp early, patch it, and lock it down read-only
+          # so 'make' is forced to use our modified version instead of trying to overwrite it.
+          make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
 
-          args = sys.argv[1:]
-          # If compiling embeder.cpp or any .s/.cpp file, we can intercept or post-process.
-          # Better yet, let's look for embeder.cpp and fix it if it exists.
-          try:
-              with open("embeder.cpp", "r") as f:
-                  content = f.read()
-              if ".align 64" in content or ".align 32" in content or ".align 16" in content:
-                  content = content.replace(".align 64", ".align 6")
-                  content = content.replace(".align 32", ".align 5")
-                  content = content.replace(".align 16", ".align 4")
-                  with open("embeder.cpp", "w") as f:
-                      f.write(content)
-          except Exception:
-              pass
+          if [ -f "embeder.cpp" ]; then
+            chmod +w embeder.cpp
+            sed -i 's/\.align 64/\.align 6/g' embeder.cpp
+            sed -i 's/\.align 32/\.align 5/g' embeder.cpp
+            sed -i 's/\.align 16/\.align 4/g' embeder.cpp
+            chmod -w embeder.cpp
+          else
+            echo "ERROR: embeder.cpp missing!"
+            exit 1
+          fi
 
-          # Forward execution to actual NDK clang++
-          sys.exit(subprocess.call(args))
-          EOF
-          chmod +x wrapper.py
-
-          # 4. Run standard make prune using our wrapper as the C++ compiler override
+          # 4. Run standard make prune cleanly
           make prune \
-            CXX="python3 $(pwd)/wrapper.py $NDK_CXX" \
+            CXX="$NDK_CXX" \
             CC="$NDK_CC" \
             ARCH=armv8-a \
             CPUSET=unknow \
