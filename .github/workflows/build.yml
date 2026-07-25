@@ -35,7 +35,7 @@ jobs:
 
     - name: Download sse2neon Header
       run: |
-        # Download into both root and core directories to ensure the compiler finds it regardless of relative includes
+        # Download into both root and core directories to ensure the compiler finds it
         curl -sL https://raw.githubusercontent.com/DLTcollab/sse2neon/master/sse2neon.h -o sse2neon.h
         mkdir -p core && cp sse2neon.h core/
 
@@ -51,14 +51,13 @@ jobs:
 
             original = content
 
-            # Safely replace the entire #include <immintrin.h> directive
-            if "<immintrin.h>" in content:
-                replacement = """#if defined(__aarch64__) || defined(__ARM_NEON)
+            # Safely replace ANY x86 intrinsic header (immintrin.h, x86intrin.h, smmintrin.h, etc.)
+            replacement = """#if defined(__aarch64__) || defined(__ARM_NEON)
         #include "sse2neon.h"
         #else
         #include <immintrin.h>
         #endif"""
-                content = re.sub(r'#include\s*<immintrin\.h>', replacement, content)
+            content = re.sub(r'#include\s*<[a-zA-Z0-9_]*intrin\.h>', replacement, content)
 
             if content != original:
                 with open(path, "w", encoding="utf-8") as f:
@@ -80,11 +79,11 @@ jobs:
         cd core || true
         
         # Compile targeting Android ARM64
-        # Added -D__SSE4_1__ -D__SSSE3__ -D__SSE2__ to force Prune's SIMD wrapper to activate
+        # Added -include sse2neon.h to guarantee SIMD translation is universally applied
         make prune \
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
           ARCH="armv8-a" \
-          CXXFLAGS="-O3 -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread -D__SSE4_1__ -D__SSSE3__ -D__SSE2__" \
+          CXXFLAGS="-O3 -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread -D__SSE4_1__ -D__SSSE3__ -D__SSE2__ -include sse2neon.h" \
           LDFLAGS="-fuse-ld=lld -static-libstdc++"
           
         # Move binary out to the root directory for benchmarking and artifacts
