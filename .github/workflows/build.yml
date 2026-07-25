@@ -39,64 +39,48 @@ jobs:
             ./permute pulsar.bin model.bin
           fi
 
-          # 3. Force generation of embeder.cpp and patch alignments
-          make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
+          # 3. Create a wrapper script for the compiler/assembler that automatically 
+          # fixes any .align 64 / .align 32 instructions in assembly files on-the-fly!
+          cat << 'EOF' > wrapper.py
+          import sys
+          import subprocess
 
-          if [ -f "embeder.cpp" ]; then
-            sed -i 's/\.align 64/\.align 6/g' embeder.cpp
-            sed -i 's/\.align 32/\.align 5/g' embeder.cpp
-            sed -i 's/\.align 16/\.align 4/g' embeder.cpp
-          else
-            echo "ERROR: embeder.cpp missing!"
-            exit 1
-          fi
+          args = sys.argv[1:]
+          # If compiling embeder.cpp or any .s/.cpp file, we can intercept or post-process.
+          # Better yet, let's look for embeder.cpp and fix it if it exists.
+          try:
+              with open("embeder.cpp", "r") as f:
+                  content = f.read()
+              if ".align 64" in content or ".align 32" in content or ".align 16" in content:
+                  content = content.replace(".align 64", ".align 6")
+                  content = content.replace(".align 32", ".align 5")
+                  content = content.replace(".align 16", ".align 4")
+                  with open("embeder.cpp", "w") as f:
+                      f.write(content)
+          except Exception:
+              pass
 
-          # 4. Compile embeder.o directly (omitting -Werror to avoid warnings breaking the build)
-          "$NDK_CXX" -Wshadow -Wall -Wextra -MMD -std=gnu++17 -I../Fathom/src \
-            -fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument \
-            -O3 -march=armv8-a \
-            -c -o embeder.o embeder.cpp
+          # Forward execution to actual NDK clang++
+          sys.exit(subprocess.call(args))
+          EOF
+          chmod +x wrapper.py
 
-          # 5. Compile remaining source files manually (excluding embeder.cpp)
-          echo "Compiling remaining source files manually..."
-          SOURCES=$(ls *.cpp | grep -v "embeder.cpp" || true)
-          OBJECTS=""
-          
-          for src in $SOURCES; do
-            obj="${src%.cpp}.o"
-            echo "Compiling $src -> $obj"
-            "$NDK_CXX" -Wshadow -Wall -Wextra -MMD -std=gnu++17 -I../Fathom/src \
-              -fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument \
-              -O3 -march=armv8-a \
-              -c -o "$obj" "$src"
-            OBJECTS="$OBJECTS $obj"
-          done
-
-          # 6. Build Fathom support if present in subdirectory
-          FATHOM_OBJ=""
-          if [ -d "../Fathom/src" ]; then
-            echo "Compiling Fathom tablebase library..."
-            for fsrc in ../Fathom/src/*.c; do
-              if [ -f "$fsrc" ]; then
-                fobj="$(basename ${fsrc%.c}.o)"
-                "$NDK_CC" -Wall -O3 -march=armv8-a -fPIE -c "$fsrc" -o "$fobj" || true
-                if [ -f "$fobj" ]; then
-                  FATHOM_OBJ="$FATHOM_OBJ $fobj"
-                fi
-              fi
-            done
-          fi
-
-          echo "Linking final executable..."
-          "$NDK_CXX" -O3 -march=armv8-a \
-            -fPIE -pie -static-libstdc++ -lpthread \
-            $OBJECTS embeder.o $FATHOM_OBJ -o prune
+          # 4. Run standard make prune using our wrapper as the C++ compiler override
+          make prune \
+            CXX="python3 $(pwd)/wrapper.py $NDK_CXX" \
+            CC="$NDK_CC" \
+            ARCH=armv8-a \
+            CPUSET=unknow \
+            OPT="-O3 -flto" \
+            ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" \
+            LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread"
 
           VERSION=$(git rev-parse --short HEAD)
           mkdir -p ../artifacts
           
-          if [ -f "prune" ]; then
-            cp "prune" ../artifacts/Prune-${VERSION}-android-arm64
+          PRUNE_BIN=$(find . -maxdepth 1 ! -name "*.*" -type f -executable | head -n 1)
+          if [ -f "$PRUNE_BIN" ]; then
+            cp "$PRUNE_BIN" ../artifacts/Prune-${VERSION}-android-arm64
           else
             echo "ERROR: Prune executable not found!"
             exit 1
