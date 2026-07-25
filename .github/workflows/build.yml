@@ -30,11 +30,23 @@ jobs:
           NDK_CXX="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++"
           NDK_CC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
 
-          # 1. Build host tools and generate the network binary model.bin
+          # 1. Build permute natively on host
           make permute CXX=g++ ARCH=native OPT="-O3"
-          make model.bin CXX=g++ ARCH=native OPT="-O3"
 
-          # 2. Force generation of embeder.cpp so we can patch its alignment instruction
+          # 2. Download pulsar.bin if it doesn't exist yet
+          if [ ! -f "pulsar.bin" ]; then
+            curl -L -o pulsar.bin https://github.com/dseaman/Prune/releases/download/net/pulsar.bin || true
+          fi
+
+          # 3. Explicitly generate model.bin using permute
+          if [ -f "pulsar.bin" ]; then
+            ./permute pulsar.bin model.bin
+          else
+            echo "ERROR: pulsar.bin could not be obtained!"
+            exit 1
+          fi
+
+          # 4. Force generation of embeder.cpp so we can patch its alignment instruction
           make embeder.o CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
 
           # Patch .align 64 to .align 6 for ARM64 GNU assembler compatibility
@@ -42,7 +54,7 @@ jobs:
             sed -i 's/\.align 64/\.align 6/g' embeder.cpp
           fi
 
-          # 3. Build the actual Android ARM64 engine using the NDK toolchain
+          # 5. Build the actual Android ARM64 engine using the NDK toolchain
           make prune \
             CXX="$NDK_CXX" \
             CC="$NDK_CC" \
