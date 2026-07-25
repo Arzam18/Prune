@@ -33,36 +33,18 @@ jobs:
           # 1. Build permute natively on host
           make permute CXX=g++ ARCH=native OPT="-O3"
 
-          # 2. Download and generate model.bin
-          curl -L -o pulsar.bin https://github.com/dseaman/Prune/releases/download/net/pulsar.bin
-          if [ -f "pulsar.bin" ]; then
+          # 2. Let the Makefile handle its download/SHA verification cleanly first
+          make model.bin CXX=g++ ARCH=native OPT="-O3" || true
+
+          # 3. Ensure model.bin is explicitly generated via permute if missing
+          if [ -f "pulsar.bin" ] && [ ! -f "model.bin" ]; then
             ./permute pulsar.bin model.bin
-          else
-            echo "ERROR: pulsar.bin download failed!"
-            exit 1
           fi
 
-          # 3. Force generation of embeder.cpp via the NDK compiler target
-          make embeder.cpp \
-            CXX="$NDK_CXX" \
-            CC="$NDK_CC" \
-            ARCH=armv8-a \
-            CPUSET=unknow \
-            OPT="-O3" \
-            ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" || true
+          # 4. Force generation of embeder.cpp so we can patch it
+          make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
 
-          # If embeder.cpp wasn't generated as a standalone file, force it via embeder.o compilation
-          if [ ! -f "embeder.cpp" ]; then
-            make embeder.o \
-              CXX="$NDK_CXX" \
-              CC="$NDK_CC" \
-              ARCH=armv8-a \
-              CPUSET=unknow \
-              OPT="-O3" \
-              ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" || true
-          fi
-
-          # 4. Patch .align 64 to .align 6 in embeder.cpp for ARM64 GNU assembler compatibility
+          # 5. Patch .align 64 to .align 6 for ARM64 GNU assembler compatibility
           if [ -f "embeder.cpp" ]; then
             echo "Patching embeder.cpp assembly alignments for ARM64..."
             sed -i 's/\.align 64/\.align 6/g' embeder.cpp
@@ -71,7 +53,10 @@ jobs:
             exit 1
           fi
 
-          # 5. Build the actual Android ARM64 engine using the NDK toolchain (DO NOT run make clean!)
+          # 6. Protect embeder.cpp from being overwritten by making it read-only temporarily
+          chmod -w embeder.cpp
+
+          # 7. Build the actual Android ARM64 engine using the NDK toolchain
           make prune \
             CXX="$NDK_CXX" \
             CC="$NDK_CC" \
