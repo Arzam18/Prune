@@ -30,6 +30,10 @@ jobs:
           NDK_CXX="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++"
           NDK_CC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
 
+          # Step 1: Build the network permute tool natively on the host (Linux x86_64) using g++
+          make permute CXX=g++ ARCH=native OPT="-O3"
+
+          # Step 2: Build the actual Android ARM64 engine using the NDK toolchain
           make prune \
             CXX="$NDK_CXX" \
             CC="$NDK_CC" \
