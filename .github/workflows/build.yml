@@ -39,46 +39,51 @@ jobs:
             ./permute pulsar.bin model.bin
           fi
 
-          # 3. Create a custom Python/Perl/Sed script or inline generator to completely bypass 
-          # the buggy assembly alignment in embeder.cpp by overriding how embeder.o is built.
-          # Instead of relying on Makefile rules, we directly compile embeder.cpp with sed pre-applied.
-          
-          # Force generation of embeder.cpp
+          # 3. Force generation of embeder.cpp and patch alignments
           make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
 
           if [ -f "embeder.cpp" ]; then
             sed -i 's/\.align 64/\.align 6/g' embeder.cpp
             sed -i 's/\.align 32/\.align 5/g' embeder.cpp
             sed -i 's/\.align 16/\.align 4/g' embeder.cpp
+          else
+            echo "ERROR: embeder.cpp missing!"
+            exit 1
           fi
 
-          # Compile embeder.o manually using the NDK toolchain with the patch securely in place
+          # 4. Compile embeder.o directly
           "$NDK_CXX" -Werror -Wshadow -Wall -Wextra -MMD -std=gnu++17 -I../Fathom/src \
             -fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument \
             -O3 -march=armv8-a \
             -c -o embeder.o embeder.cpp
 
-          # 4. Strip embeder.cpp and embeder.o references from Makefile so it never tries to touch them again
-          if [ -f "Makefile" ]; then
-            sed -i '/embeder/d' Makefile || true
-          fi
+          # 5. Instead of fighting the Makefile rules, we directly invoke the final linker command 
+          # using the NDK C++ compiler, bypassing 'make prune' entirely to prevent rule re-evaluations.
+          
+          echo "Compiling remaining source files manually..."
+          SOURCES=$(ls *.cpp | grep -v "embeder.cpp" || true)
+          OBJECTS=""
+          
+          for src in $SOURCES; do
+            obj="${src%.cpp}.o"
+            echo "Compiling $src -> $obj"
+            "$NDK_CXX" -Werror -Wshadow -Wall -Wextra -MMD -std=gnu++17 -I../Fathom/src \
+              -fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument \
+              -O3 -flto -march=armv8-a \
+              -c -o "$obj" "$src"
+            OBJECTS="$OBJECTS $obj"
+          done
 
-          # 5. Build the rest of the project and link everything including our pre-compiled embeder.o
-          make prune \
-            CXX="$NDK_CXX" \
-            CC="$NDK_CC" \
-            ARCH=armv8-a \
-            CPUSET=unknow \
-            OPT="-O3 -flto" \
-            ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" \
-            LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread embeder.o"
+          echo "Linking final executable..."
+          "$NDK_CXX" -O3 -flto -march=armv8-a \
+            -fPIE -pie -static-libstdc++ -lpthread \
+            $OBJECTS embeder.o -o prune
 
           VERSION=$(git rev-parse --short HEAD)
           mkdir -p ../artifacts
           
-          PRUNE_BIN=$(find . -maxdepth 1 ! -name "*.*" -type f -executable | head -n 1)
-          if [ -f "$PRUNE_BIN" ]; then
-            cp "$PRUNE_BIN" ../artifacts/Prune-${VERSION}-android-arm64
+          if [ -f "prune" ]; then
+            cp "prune" ../artifacts/Prune-${VERSION}-android-arm64
           else
             echo "ERROR: Prune executable not found!"
             exit 1
