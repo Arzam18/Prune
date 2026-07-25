@@ -39,22 +39,23 @@ jobs:
             ./permute pulsar.bin model.bin
           fi
 
-          # 3. Force clean generation of embeder.cpp so we can patch it properly
+          # 3. Force clean generation of embeder.cpp
           rm -f embeder.cpp
           make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
 
           if [ -f "embeder.cpp" ]; then
-            python3 -c '
-f = open("embeder.cpp", "r")
-content = f.read()
-f.close()
-content = content.replace(".align 64", ".align 6")
-content = content.replace(".align 32", ".align 5")
-content = content.replace(".align 16", ".align 4")
-f = open("embeder.cpp", "w")
-f.write(content)
-f.close()
-'
+            # Write a safe external python script to patch alignments
+            cat << 'PYEOF' > patch.py
+            with open("embeder.cpp", "r") as f:
+                content = f.read()
+            content = content.replace(".align 64", ".align 6")
+            content = content.replace(".align 32", ".align 5")
+            content = content.replace(".align 16", ".align 4")
+            with open("embeder.cpp", "w") as f:
+                f.write(content)
+            PYEOF
+            python3 patch.py
+            rm patch.py
           else
             echo "ERROR: embeder.cpp missing!"
             exit 1
