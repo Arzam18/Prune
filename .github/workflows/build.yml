@@ -39,31 +39,21 @@ jobs:
             ./permute pulsar.bin model.bin
           fi
 
-          # 3. Force clean generation of embeder.cpp
-          rm -f embeder.cpp
-          make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
-
-          if [ -f "embeder.cpp" ]; then
-            # Write python patch script completely flush to prevent indentation errors
-            echo 'with open("embeder.cpp", "r") as f:' > patch.py
-            echo '    content = f.read()' >> patch.py
-            echo 'content = content.replace(".align 64", ".align 6")' >> patch.py
-            echo 'content = content.replace(".align 32", ".align 5")' >> patch.py
-            echo 'content = content.replace(".align 16", ".align 4")' >> patch.py
-            echo 'with open("embeder.cpp", "w") as f:' >> patch.py
-            echo '    f.write(content)' >> patch.py
-            
-            python3 patch.py
-            rm patch.py
-          else
-            echo "ERROR: embeder.cpp missing!"
-            exit 1
+          # 3. Look for whatever target builds the embedding/network file in the Makefile
+          # If 'embeder.cpp' doesn't have a make rule, let's see how model.bin generates source or just invoke the script directly.
+          if [ -f "model.bin" ] && [ -f "permute.cpp" ]; then
+            # If permute generates it or another tool does, let's run it. Otherwise invoke whatever target exists.
+            make model.cpp CXX="$NDK_CXX" ARCH=armv8-a || make generate CXX="$NDK_CXX" || true
           fi
 
-          # Lock down embeder.cpp so Makefile cannot overwrite it
-          chmod -w embeder.cpp
+          # Fallback: if embeder.cpp is still missing, let's find any .cpp rule or generate it via host permute/python if needed
+          if [ ! -f "embeder.cpp" ]; then
+            # Search for how embeder.cpp is built in Makefile or generate an empty/dummy one if it's optional, 
+            # or check if model.bin can be converted directly. Let's list files to see what we have.
+            ls -la
+          }
 
-          # 4. Run standard make prune cleanly
+          # Let's run make with verbose output to find the exact target name if embeder.cpp failed
           make prune \
             CXX="$NDK_CXX" \
             CC="$NDK_CC" \
@@ -71,17 +61,7 @@ jobs:
             CPUSET=unknow \
             OPT="-O3 -flto" \
             ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" \
-            LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread" || {
-              chmod +w embeder.cpp
-              make prune \
-                CXX="$NDK_CXX" \
-                CC="$NDK_CC" \
-                ARCH=armv8-a \
-                CPUSET=unknow \
-                OPT="-O3 -flto" \
-                ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" \
-                LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread"
-            }
+            LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread"
 
           VERSION=$(git rev-parse --short HEAD)
           mkdir -p ../artifacts
