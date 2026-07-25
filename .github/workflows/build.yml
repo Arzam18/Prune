@@ -39,36 +39,30 @@ jobs:
             ./permute pulsar.bin model.bin
           fi
 
-          # 3. Look for whatever target builds the embedding/network file in the Makefile
-          # If 'embeder.cpp' doesn't have a make rule, let's see how model.bin generates source or just invoke the script directly.
-          if [ -f "model.bin" ] && [ -f "permute.cpp" ]; then
-            # If permute generates it or another tool does, let's run it. Otherwise invoke whatever target exists.
-            make model.cpp CXX="$NDK_CXX" ARCH=armv8-a || make generate CXX="$NDK_CXX" || true
-          fi
+          # 3. Clean compile all source files directly with NDK clang++
+          echo "Compiling sources for Android ARM64..."
+          OBJECTS=""
+          for src in *.cpp; do
+            if [ "$src" = "permute.cpp" ]; then
+              continue
+            fi
+            obj="${src%.cpp}.o"
+            echo "Compiling $src -> $obj"
+            "$NDK_CXX" -std=gnu++17 -O3 -march=armv8-a -fPIE -D__ARM_NEON__ \
+              -Wno-unused-command-line-argument -c -o "$obj" "$src" || true
+            if [ -f "$obj" ]; then
+              OBJECTS="$OBJECTS $obj"
+            fi
+          done
 
-          # Fallback: if embeder.cpp is still missing, let's find any .cpp rule or generate it via host permute/python if needed
-          if [ ! -f "embeder.cpp" ]; then
-            # Search for how embeder.cpp is built in Makefile or generate an empty/dummy one if it's optional, 
-            # or check if model.bin can be converted directly. Let's list files to see what we have.
-            ls -la
-          }
-
-          # Let's run make with verbose output to find the exact target name if embeder.cpp failed
-          make prune \
-            CXX="$NDK_CXX" \
-            CC="$NDK_CC" \
-            ARCH=armv8-a \
-            CPUSET=unknow \
-            OPT="-O3 -flto" \
-            ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" \
-            LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread"
+          # 4. Link everything into the final binary
+          echo "Linking final executable..."
+          "$NDK_CXX" -pie -static-libstdc++ -lpthread $OBJECTS -o prune
 
           VERSION=$(git rev-parse --short HEAD)
           mkdir -p ../artifacts
-          
-          PRUNE_BIN=$(find . -maxdepth 1 ! -name "*.*" -type f -executable | head -n 1)
-          if [ -f "$PRUNE_BIN" ]; then
-            cp "$PRUNE_BIN" ../artifacts/Prune-${VERSION}-android-arm64
+          if [ -f "prune" ]; then
+            cp "prune" ../artifacts/Prune-${VERSION}-android-arm64
           else
             echo "ERROR: Prune executable not found!"
             exit 1
