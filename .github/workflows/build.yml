@@ -36,7 +36,7 @@ jobs:
             ARCH=armv8-a \
             CPUSET=unknow \
             OPT="-O3 -flto" \
-            ADDOPTION="-fPIE -Wno-unused-command-line-argument" \
+            ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" \
             LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread"
 
           VERSION=$(git rev-parse --short HEAD)
