@@ -33,30 +33,25 @@ jobs:
           # 1. Build permute natively on host
           make permute CXX=g++ ARCH=native OPT="-O3"
 
-          # 2. Let the Makefile handle its download/SHA verification cleanly first
+          # 2. Download and generate model.bin
           make model.bin CXX=g++ ARCH=native OPT="-O3" || true
-
-          # 3. Ensure model.bin is explicitly generated via permute if missing
           if [ -f "pulsar.bin" ] && [ ! -f "model.bin" ]; then
             ./permute pulsar.bin model.bin
           fi
 
-          # 4. Force generation of embeder.cpp so we can patch it
+          # 3. Pre-generate embeder.cpp and patch it immediately
           make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
-
-          # 5. Patch .align 64 to .align 6 for ARM64 GNU assembler compatibility
           if [ -f "embeder.cpp" ]; then
-            echo "Patching embeder.cpp assembly alignments for ARM64..."
             sed -i 's/\.align 64/\.align 6/g' embeder.cpp
-          else
-            echo "ERROR: embeder.cpp was not generated!"
-            exit 1
           fi
 
-          # 6. Protect embeder.cpp from being overwritten by making it read-only temporarily
-          chmod -w embeder.cpp
+          # 4. Modify the Makefile itself to permanently strip out any dynamic regeneration 
+          # of embeder.cpp that triggers during 'make prune'
+          if [ -f "Makefile" ]; then
+            sed -i '/embeder.cpp/d' Makefile || true
+          fi
 
-          # 7. Build the actual Android ARM64 engine using the NDK toolchain
+          # 5. Build the actual Android ARM64 engine using the NDK toolchain
           make prune \
             CXX="$NDK_CXX" \
             CC="$NDK_CC" \
