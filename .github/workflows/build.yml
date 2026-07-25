@@ -79,11 +79,12 @@ jobs:
         # Prune's architecture requires running Make inside the core/ directory
         cd core || true
         
-        # Compile targeting Android ARM64. Notice ARCH="armv8-a" to prevent the double flag issue!
+        # Compile targeting Android ARM64
+        # Added -D__SSE4_1__ -D__SSSE3__ -D__SSE2__ to force Prune's SIMD wrapper to activate
         make prune \
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
           ARCH="armv8-a" \
-          CXXFLAGS="-O3 -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread" \
+          CXXFLAGS="-O3 -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread -D__SSE4_1__ -D__SSSE3__ -D__SSE2__" \
           LDFLAGS="-fuse-ld=lld -static-libstdc++"
           
         # Move binary out to the root directory for benchmarking and artifacts
