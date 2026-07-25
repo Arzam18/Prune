@@ -57,9 +57,7 @@ jobs:
             -O3 -march=armv8-a \
             -c -o embeder.o embeder.cpp
 
-          # 5. Instead of fighting the Makefile rules, we directly invoke the final linker command 
-          # using the NDK C++ compiler, bypassing 'make prune' entirely to prevent rule re-evaluations.
-          
+          # 5. Compile remaining source files manually (excluding embeder.cpp)
           echo "Compiling remaining source files manually..."
           SOURCES=$(ls *.cpp | grep -v "embeder.cpp" || true)
           OBJECTS=""
@@ -74,10 +72,25 @@ jobs:
             OBJECTS="$OBJECTS $obj"
           done
 
+          # 6. Build Fathom support if present in subdirectory
+          FATHOM_OBJ=""
+          if [ -d "../Fathom/src" ]; then
+            echo "Compiling Fathom tablebase library..."
+            for fsrc in ../Fathom/src/*.c; do
+              if [ -f "$fsrc" ]; then
+                fobj="$(basename ${fsrc%.c}.o)"
+                "$NDK_CC" -Wall -O3 -march=armv8-a -fPIE -c "$fsrc" -o "$fobj" || true
+                if [ -f "$fobj" ]; then
+                  FATHOM_OBJ="$FATHOM_OBJ $fobj"
+                fi
+              fi
+            done
+          fi
+
           echo "Linking final executable..."
           "$NDK_CXX" -O3 -flto -march=armv8-a \
             -fPIE -pie -static-libstdc++ -lpthread \
-            $OBJECTS embeder.o -o prune
+            $OBJECTS embeder.o $FATHOM_OBJ -o prune
 
           VERSION=$(git rev-parse --short HEAD)
           mkdir -p ../artifacts
