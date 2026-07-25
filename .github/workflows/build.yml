@@ -39,36 +39,27 @@ jobs:
             ./permute pulsar.bin model.bin
           fi
 
-          # 3. Handle embeder.cpp completely via standard file replacement.
-          # If the Makefile generates embeder.cpp via a script or rule, we can supply a tiny python script
-          # or just rewrite the Makefile rule so it generates the code with correct alignment right away.
-          if grep -q "embeder.cpp" Makefile; then
-            # Patch the Makefile rule that generates embeder.cpp to substitute .align 64 with .align 6 automatically
-            sed -i '/embeder.cpp/ {
-              N
-              s/\.align 64/\.align 6/g
-            }' Makefile || true
-          fi
-
-          # Alternatively, let's just make a permanent python post-processor for embeder.cpp 
-          # inside the Makefile or run it immediately after generation.
+          # 3. Force clean generation of embeder.cpp so we can patch it properly
+          rm -f embeder.cpp
           make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
 
           if [ -f "embeder.cpp" ]; then
             python3 -c '
-            with open("embeder.cpp", "r") as f:
-                content = f.read()
-            content = content.replace(".align 64", ".align 6")
-            content = content.replace(".align 32", ".align 5")
-            content = content.replace(".align 16", ".align 4")
-            with open("embeder.cpp", "w") as f:
-                f.write(content)
-            '
+with open("embeder.cpp", "r") as f:
+    content = f.read()
+content = content.replace(".align 64", ".align 6")
+content = content.replace(".align 32", ".align 5")
+content = content.replace(".align 16", ".align 4")
+with open("embeder.cpp", "w") as f:
+    f.write(content)
+'
+          else
+            echo "ERROR: embeder.cpp missing!"
+            exit 1
           fi
 
-          # To prevent the Makefile from attempting to recreate embeder.cpp during 'make prune',
-          # we touch the file with a future timestamp or remove its prerequisite rule from Makefile.
-          sed -i '/^embeder\.cpp:/,$ { /^\t/! { /^[^:]*:/d } }' Makefile || true
+          # Lock down embeder.cpp so Makefile cannot overwrite it
+          chmod -w embeder.cpp
 
           # 4. Run standard make prune cleanly
           make prune \
@@ -78,7 +69,18 @@ jobs:
             CPUSET=unknow \
             OPT="-O3 -flto" \
             ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" \
-            LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread"
+            LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread" || {
+              # Fallback: if make prune complains about read-only file, unlock temporarily for the build rule if needed
+              chmod +w embeder.cpp
+              make prune \
+                CXX="$NDK_CXX" \
+                CC="$NDK_CC" \
+                ARCH=armv8-a \
+                CPUSET=unknow \
+                OPT="-O3 -flto" \
+                ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" \
+                LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread"
+            }
 
           VERSION=$(git rev-parse --short HEAD)
           mkdir -p ../artifacts
