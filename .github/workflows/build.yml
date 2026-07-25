@@ -45,13 +45,15 @@ jobs:
 
           if [ -f "embeder.cpp" ]; then
             python3 -c '
-with open("embeder.cpp", "r") as f:
-    content = f.read()
+f = open("embeder.cpp", "r")
+content = f.read()
+f.close()
 content = content.replace(".align 64", ".align 6")
 content = content.replace(".align 32", ".align 5")
 content = content.replace(".align 16", ".align 4")
-with open("embeder.cpp", "w") as f:
-    f.write(content)
+f = open("embeder.cpp", "w")
+f.write(content)
+f.close()
 '
           else
             echo "ERROR: embeder.cpp missing!"
@@ -70,7 +72,6 @@ with open("embeder.cpp", "w") as f:
             OPT="-O3 -flto" \
             ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" \
             LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread" || {
-              # Fallback: if make prune complains about read-only file, unlock temporarily for the build rule if needed
               chmod +w embeder.cpp
               make prune \
                 CXX="$NDK_CXX" \
