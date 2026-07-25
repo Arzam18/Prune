@@ -79,11 +79,11 @@ jobs:
         # Prune's architecture requires running Make inside the core/ directory
         cd core || true
         
-        # Compile targeting Android ARM64 using NDK Clang with sse2neon integration
+        # Compile targeting Android ARM64. Notice ARCH="armv8-a" to prevent the double flag issue!
         make prune \
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
-          ARCH="-march=armv8-a" \
-          CXXFLAGS="-O3 -march=armv8-a -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread" \
+          ARCH="armv8-a" \
+          CXXFLAGS="-O3 -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread" \
           LDFLAGS="-fuse-ld=lld -static-libstdc++"
           
         # Move binary out to the root directory for benchmarking and artifacts
