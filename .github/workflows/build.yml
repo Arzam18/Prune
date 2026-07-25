@@ -51,7 +51,7 @@ jobs:
 
             original = content
 
-            # Safely replace ANY x86 intrinsic header (immintrin.h, x86intrin.h, smmintrin.h, etc.)
+            # Safely replace ANY x86 intrinsic header
             replacement = """#if defined(__aarch64__) || defined(__ARM_NEON)
         #include "sse2neon.h"
         #else
@@ -79,11 +79,11 @@ jobs:
         cd core || true
         
         # Compile targeting Android ARM64
-        # Added -include sse2neon.h to guarantee SIMD translation is universally applied
+        # Added -Wno-unused-parameter to prevent sse2neon warnings from failing the build
         make prune \
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
           ARCH="armv8-a" \
-          CXXFLAGS="-O3 -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread -D__SSE4_1__ -D__SSSE3__ -D__SSE2__ -include sse2neon.h" \
+          CXXFLAGS="-O3 -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread -D__SSE4_1__ -D__SSSE3__ -D__SSE2__ -include sse2neon.h -Wno-unused-parameter" \
           LDFLAGS="-fuse-ld=lld -static-libstdc++"
           
         # Move binary out to the root directory for benchmarking and artifacts
