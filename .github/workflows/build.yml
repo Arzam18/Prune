@@ -34,20 +34,20 @@ jobs:
           make permute CXX=g++ ARCH=native OPT="-O3"
           make model.bin CXX=g++ ARCH=native OPT="-O3"
 
-          # 2. Build the actual Android ARM64 engine using the NDK toolchain
+          # 2. Build the actual Android ARM64 engine using the NDK toolchain with GNU assembler fallback
           make prune \
             CXX="$NDK_CXX" \
             CC="$NDK_CC" \
             ARCH=armv8-a \
             CPUSET=unknow \
             OPT="-O3 -flto" \
-            ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" \
+            ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument -no-integrated-as" \
             LDFLAGS="-fPIE -pie -static-libstdc++ -lpthread"
 
           VERSION=$(git rev-parse --short HEAD)
           mkdir -p ../artifacts
           
-          PRUNE_BIN=$(find . -maxdepth 1 -type f -executable -not -name "*.*" | head -n 1)
+          PRUNE_BIN=$(find . -maxdepth 1 ! -name "*.*" -type f -executable | head -n 1)
           if [ -f "$PRUNE_BIN" ]; then
             cp "$PRUNE_BIN" ../artifacts/Prune-${VERSION}-android-arm64
           else
