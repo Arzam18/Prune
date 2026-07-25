@@ -44,16 +44,15 @@ jobs:
           make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
 
           if [ -f "embeder.cpp" ]; then
-            # Write a safe external python script to patch alignments
-            cat << 'PYEOF' > patch.py
-            with open("embeder.cpp", "r") as f:
-                content = f.read()
-            content = content.replace(".align 64", ".align 6")
-            content = content.replace(".align 32", ".align 5")
-            content = content.replace(".align 16", ".align 4")
-            with open("embeder.cpp", "w") as f:
-                f.write(content)
-            PYEOF
+            # Write python patch script completely flush to prevent indentation errors
+            echo 'with open("embeder.cpp", "r") as f:' > patch.py
+            echo '    content = f.read()' >> patch.py
+            echo 'content = content.replace(".align 64", ".align 6")' >> patch.py
+            echo 'content = content.replace(".align 32", ".align 5")' >> patch.py
+            echo 'content = content.replace(".align 16", ".align 4")' >> patch.py
+            echo 'with open("embeder.cpp", "w") as f:' >> patch.py
+            echo '    f.write(content)' >> patch.py
+            
             python3 patch.py
             rm patch.py
           else
