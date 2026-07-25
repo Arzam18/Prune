@@ -1,119 +1,87 @@
-name: Build Project
+name: Build Prune Android Pre-Release
+
 on:
   push:
-    tags:
-      - '*'  # Pour tous les nouveaux tags 
+    branches: [ "main" ]
   pull_request:
-    branches: [ main ]
+    types:
+      - closed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
 jobs:
-  build:
-    name: Build on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}  # Allow Windows to fail
-    strategy:
-      fail-fast: false  # Don't cancel other jobs if one fails
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-15-intel, macos-latest]
+  build-android:
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main')
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          submodules: recursive
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ make
-
-      - name: Install dependencies (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          choco install make
-
-      - name: Build project
+      - name: Build Prune UCI for Android ARM64
         working-directory: ./core
         run: |
-          make -j
+          # Point directly to the Android NDK Clang compiler for aarch64 (API level 28+)
+          NDK_CXX="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++"
+          NDK_CC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
 
-      - name: Build HCE version
-        working-directory: ./core
-        run: |
-          make -B -j HCE=true
+          # Compile using Prune's Makefile parameters for generic ARMv8 NEON
+          make prune \
+            CXX="$NDK_CXX" \
+            CC="$NDK_CC" \
+            ARCH=armv8-a \
+            CPUSET=unknow \
+            OPT="-O3 -flto" \
+            ADDOPTION="-fPIE -static-libstdc++" \
+            LDFLAGS="-fPIE -pie -lpthread"
 
-      - name: Test bench (Linux/macOS)
-        if: runner.os != 'Windows'
-        working-directory: ./core
-        run: |
-          # Find the prune executable (excludes HCE and .o files)
-          PRUNE_EXE=$(find . -maxdepth 1 -name 'prune-*' ! -name '*HCE*' ! -name '*.d' -type f | head -n 1)
-          if [ -z "$PRUNE_EXE" ]; then
-            echo "ERROR: prune executable not found!"
-            exit 1
-          fi
-          echo "Found executable: $PRUNE_EXE"
-          chmod +x "$PRUNE_EXE"
-
-          # Run bench and capture output + exit code
-          OUTPUT=$("$PRUNE_EXE" bench 2>&1)
-          EXIT_CODE=$?
-          echo "$OUTPUT"
-
-          # Check exit code
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "ERROR: bench exited with signal/code $EXIT_CODE"
-            exit 1
-          fi
-          echo "Exit code: OK (0)"
-
-          # Check last line format: <nbnodes> nodes <nps> nps
-          LAST_LINE=$(echo "$OUTPUT" | tail -n 1)
-          echo "Last line: $LAST_LINE"
-          if echo "$LAST_LINE" | grep -qE '^[0-9]+ nodes [0-9]+ nps$'; then
-            echo "Last line format: OK"
+          # Versioning and package layout
+          VERSION=$(git rev-parse --short HEAD)
+          mkdir -p ../artifacts
+          
+          # Prune generates a dynamic shortname based on Makefile logic, let's find and copy it safely
+          PRUNE_BIN=$(find . -maxdepth 1 -type f -executable -not -name "*.*" | head -n 1)
+          if [ -f "$PRUNE_BIN" ]; then
+            cp "$PRUNE_BIN" ../artifacts/Prune-${VERSION}-android-arm64
           else
-            echo "ERROR: last line does not match expected format '<nbnodes> nodes <nps> nps'"
+            echo "ERROR: Prune executable not found!"
             exit 1
           fi
 
-      - name: Test bench (Windows)
-        if: runner.os == 'Windows'
-        working-directory: ./core
-        shell: pwsh
-        run: |
-          # Find the prune executable
-          $PRUNE_EXE = Get-ChildItem -Path . -Filter "prune-*.exe" -File | Where-Object { $_.Name -notlike "*HCE*" } | Where-Object { $_.Name -notlike "*.d" } | Select-Object -First 1
-          if (-not $PRUNE_EXE) {
-            Write-Error "ERROR: prune executable not found!"
-            exit 1
-          }
-          Write-Host "Found executable: $($PRUNE_EXE.Name)"
-
-          # Run bench and capture output + exit code
-          $OUTPUT = & ".\$($PRUNE_EXE.Name)" bench 2>&1
-          $EXIT_CODE = $LASTEXITCODE
-          Write-Host $OUTPUT
-
-          # Check exit code
-          if ($EXIT_CODE -ne 0) {
-            Write-Error "ERROR: bench exited with code $EXIT_CODE"
-            exit 1
-          }
-          Write-Host "Exit code: OK (0)"
-
-          # Check last line format: <nbnodes> nodes <nps> nps
-          $LAST_LINE = ($OUTPUT | Select-Object -Last 1).ToString().Trim()
-          Write-Host "Last line: $LAST_LINE"
-          if ($LAST_LINE -match '^\d+ nodes \d+ nps$') {
-            Write-Host "Last line format: OK"
-          } else {
-            Write-Error "ERROR: last line does not match expected format '<nbnodes> nodes <nps> nps'"
-            exit 1
-          }
-
-      - name: Upload binaries
-        if: success()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ runner.os }}-${{ runner.arch }}-binaries
-          path: core/prune*
+          name: prune-android
+          path: artifacts/*
+
+  publish-prerelease:
+    needs:
+      - build-android
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete pre-release --yes --cleanup-tag || true
+          gh release create pre-release \
+            --title "Prune Android Pre-Release" \
+            --prerelease \
+            release-assets/prune-android/*
+
+      - name: Clean up Android artifact
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: prune-android
