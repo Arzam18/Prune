@@ -33,27 +33,37 @@ jobs:
           # 1. Build permute natively on host
           make permute CXX=g++ ARCH=native OPT="-O3"
 
-          # 2. Download pulsar.bin network weights
-          echo "Downloading pulsar.bin network weights..."
-          curl -L -o pulsar.bin https://github.com/dseaman/Prune/releases/download/net/pulsar.bin
+          # 2. Use the Makefile's native network download/model generation target cleanly
+          make model.bin CXX=g++ ARCH=native OPT="-O3" || true
 
-          # 3. Generate model.bin using permute
-          if [ -f "pulsar.bin" ]; then
+          # If model.bin wasn't created via make, use permute manually
+          if [ ! -f "model.bin" ] && [ -f "pulsar.bin" ]; then
             ./permute pulsar.bin model.bin
+          fi
+
+          # 3. Trigger a dummy compilation dry-run or target that triggers embeder.cpp generation
+          # (The Makefile generates embeder.cpp dynamically when compiling embeder.o)
+          make embeder.o \
+            CXX="$NDK_CXX" \
+            CC="$NDK_CC" \
+            ARCH=armv8-a \
+            CPUSET=unknow \
+            OPT="-O3" \
+            ADDOPTION="-fPIE -D__ARM_NEON__ -Wno-unused-command-line-argument" || true
+
+          # 4. Patch .align 64 to .align 6 in embeder.cpp for ARM64 GNU assembler compatibility
+          if [ -f "embeder.cpp" ]; then
+            echo "Patching embeder.cpp assembly alignments for ARM64..."
+            sed -i 's/\.align 64/\.align 6/g' embeder.cpp
           else
-            echo "ERROR: pulsar.bin download failed!"
+            echo "ERROR: embeder.cpp was not generated!"
             exit 1
           fi
 
-          # 4. Generate embeder.cpp via the standard make target now that model.bin exists
-          make embeder.cpp CXX="$NDK_CXX" ARCH=armv8-a ADDOPTION="-fPIE -D__ARM_NEON__" || true
+          # 5. Clean object files to ensure clean build with the patched embeder.cpp
+          make clean || true
 
-          # If embeder.cpp was generated, patch .align 64 to .align 6 for ARM64 GNU assembler compatibility
-          if [ -f "embeder.cpp" ]; then
-            sed -i 's/\.align 64/\.align 6/g' embeder.cpp
-          fi
-
-          # 5. Build the actual Android ARM64 engine using the NDK toolchain
+          # 6. Build the actual Android ARM64 engine using the NDK toolchain
           make prune \
             CXX="$NDK_CXX" \
             CC="$NDK_CC" \
