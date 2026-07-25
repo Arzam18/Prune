@@ -57,7 +57,7 @@ jobs:
         '
         mkdir -p core && cp sse2neon.h core/
 
-    - name: Patch SIMD Headers and Makefile for Android
+    - name: Patch SIMD Headers, Makefile, and Definitions for Android
       run: |
         cat << 'EOF' > patch_simd.py
         import os
@@ -77,12 +77,25 @@ jobs:
         #endif"""
             content = re.sub(r'#include\s*<[a-zA-Z0-9_]*intrin\.h>', replacement, content)
 
-            # Bypass the strict SIMD #error guard in simd_definitions.hpp for cross-compilation
+            # Bypass the strict SIMD #error guard in simd_definitions.hpp
             if "This code requires at least SSE2 (x86) or NEON (ARM) support" in content:
                 content = content.replace(
                     '#error "This code requires at least SSE2 (x86) or NEON (ARM) support"',
                     '// #error "Bypassed for Android cross-compilation"'
                 )
+
+            # Fix missing _simd type alias or definitions for ARM64/sse2neon in simd_definitions.hpp
+            if "using simd = _simd;" in content:
+                # Provide a safe fallback mapping if _simd isn't defined under ARM64 cross-compilation
+                fallback_simd = """#ifndef _simd
+        #define _simd __m128i
+        #endif
+        using simd = _simd;"""
+                content = content.replace("using simd = _simd;", fallback_simd)
+
+            # Remove incompatible -m64 flags from Makefiles during cross-compilation
+            if path.endswith("Makefile") or "Makefile" in os.path.basename(path):
+                content = content.replace("-m64", "")
 
             if content != original:
                 with open(path, "w", encoding="utf-8") as f:
@@ -91,7 +104,7 @@ jobs:
 
         for root, dirs, files in os.walk("."):
             for file in files:
-                if file.endswith((".h", ".hpp", ".cpp", ".c", "Makefile")):
+                if file.endswith((".h", ".hpp", ".cpp", ".c", "Makefile")) or file == "Makefile":
                     patch_file(os.path.join(root, file))
         EOF
         python3 patch_simd.py
@@ -103,7 +116,7 @@ jobs:
         # Prune's architecture requires running Make inside the core/ directory
         cd core || true
         
-        # Override CXX, CXXFLAGS, CFLAGS, and strip out unwanted host architecture flags like -m64 from permute
+        # Compile targeting Android ARM64 with overrides
         make prune \
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
           ARCH="armv8-a" \
