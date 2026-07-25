@@ -57,7 +57,7 @@ jobs:
         '
         mkdir -p core && cp sse2neon.h core/
 
-    - name: Patch SIMD Headers, Makefile, and Definitions for Android
+    - name: Patch SIMD Headers and Makefile for Android
       run: |
         cat << 'EOF' > patch_simd.py
         import os
@@ -77,21 +77,17 @@ jobs:
         #endif"""
             content = re.sub(r'#include\s*<[a-zA-Z0-9_]*intrin\.h>', replacement, content)
 
+            # If this is simd_definitions.hpp, force sse2neon inclusion at the top to protect helper tools like permute
+            if "simd_definitions.hpp" in path:
+                if '#include "sse2neon.h"' not in content:
+                    content = '#if defined(__aarch64__) || defined(__ARM_NEON)\n#include "sse2neon.h"\n#endif\n' + content
+
             # Bypass the strict SIMD #error guard in simd_definitions.hpp
             if "This code requires at least SSE2 (x86) or NEON (ARM) support" in content:
                 content = content.replace(
                     '#error "This code requires at least SSE2 (x86) or NEON (ARM) support"',
                     '// #error "Bypassed for Android cross-compilation"'
                 )
-
-            # Fix missing _simd type alias or definitions for ARM64/sse2neon in simd_definitions.hpp
-            if "using simd = _simd;" in content:
-                # Provide a safe fallback mapping if _simd isn't defined under ARM64 cross-compilation
-                fallback_simd = """#ifndef _simd
-        #define _simd __m128i
-        #endif
-        using simd = _simd;"""
-                content = content.replace("using simd = _simd;", fallback_simd)
 
             # Remove incompatible -m64 flags from Makefiles during cross-compilation
             if path.endswith("Makefile") or "Makefile" in os.path.basename(path):
@@ -108,6 +104,9 @@ jobs:
                     patch_file(os.path.join(root, file))
         EOF
         python3 patch_simd.py
+        # Copy updated headers into core directory
+        cp core/simd_definitions.hpp core/simd_definitions.hpp.bak || true
+        cp simd_definitions.hpp core/ 2>/dev/null || true
 
     - name: Compile Prune for Android (aarch64)
       run: |
@@ -116,7 +115,7 @@ jobs:
         # Prune's architecture requires running Make inside the core/ directory
         cd core || true
         
-        # Compile targeting Android ARM64 with overrides
+        # Compile targeting Android ARM64
         make prune \
           CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
           ARCH="armv8-a" \
