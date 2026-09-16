@@ -16,13 +16,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
-
-      - name: Extract engine version
-        run: |
-          VERSION=$(git describe --tags --always 2>/dev/null || echo "dev-${GITHUB_SHA::7}")
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-          echo "Building Prune version: ${VERSION}"
 
       - name: Locate Prune Makefile
         id: locate-makefile
@@ -69,7 +62,7 @@ jobs:
           echo "stub_dir=$STUB_DIR" >> "$GITHUB_OUTPUT"
           ls -la "$STUB_DIR"
 
-      - name: Build Prune (ARM64 v8-A)
+      - name: Build Prune (arm64, armv8-a)
         run: |
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
           make all \
@@ -77,44 +70,45 @@ jobs:
             CC="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang" \
             ARCH=armv8-a \
             ADDOPTION="-D__ARM_NEON__=1 -fPIE" \
-            LDFLAGS="-static-pie -static-libstdc++ -L${{ steps.pthread-stub.outputs.stub_dir }}" \
-            EXE=prune-${{ env.VERSION }}-android-arm64-v8a \
+            LDFLAGS="-static-pie -L${{ steps.pthread-stub.outputs.stub_dir }}" \
+            EXE=prune-android \
             -j"$(nproc)"
 
-      - name: Build Prune (ARM64 DotProd - Cortex A76+)
+      - name: Extract libc++_shared.so from NDK
         run: |
-          cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
-          rm -f *.o src/*.o obj/*.o
-          make all \
-            CXX="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang++" \
-            CC="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang" \
-            ARCH=armv8.2-a+dotprod \
-            ADDOPTION="-D__ARM_NEON__=1 -march=armv8.2-a+dotprod -fPIE" \
-            LDFLAGS="-static-pie -static-libstdc++ -L${{ steps.pthread-stub.outputs.stub_dir }}" \
-            EXE=prune-${{ env.VERSION }}-android-arm64-dotprod \
-            -j"$(nproc)"
+          LIBCXX_PATH=$(find "${{ steps.setup-ndk.outputs.ndk-path }}" -name "libc++_shared.so" | grep "aarch64" | head -n1)
+          if [ -z "$LIBCXX_PATH" ]; then
+            echo "ERROR: libc++_shared.so not found in NDK"
+            exit 1
+          fi
+          echo "Found libc++_shared.so at: $LIBCXX_PATH"
+          cp "$LIBCXX_PATH" "${{ steps.locate-makefile.outputs.makefile_dir }}/"
 
-      - name: Confirm binaries are PIE and have no shared library dependencies
+      - name: Confirm outputs
         run: |
-          cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
-          ls -lh prune-${{ env.VERSION }}-android-*
-          file prune-${{ env.VERSION }}-android-*
-          readelf -d prune-${{ env.VERSION }}-android-arm64-v8a || echo "No dynamic section"
+          BIN="${{ steps.locate-makefile.outputs.makefile_dir }}/prune-android"
+          SO="${{ steps.locate-makefile.outputs.makefile_dir }}/libc++_shared.so"
+          file "$BIN" "$SO"
+          readelf -h "$BIN" | grep -i type
 
-      - name: Upload build artifacts
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: prune-${{ env.VERSION }}-android-binaries
-          path: ${{ steps.locate-makefile.outputs.makefile_dir }}/prune-${{ env.VERSION }}-android-*
+          name: prune-android-arm64
+          path: |
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/prune-android
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/libc++_shared.so
           if-no-files-found: error
 
       - name: Create prerelease
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.VERSION }}-android
-          name: Prune ${{ env.VERSION }} (Android)
+          tag_name: android-build-${{ github.run_number }}
+          name: Prune Android build ${{ github.run_number }}
           prerelease: true
-          files: ${{ steps.locate-makefile.outputs.makefile_dir }}/prune-${{ env.VERSION }}-android-*
+          files: |
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/prune-android
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/libc++_shared.so
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
