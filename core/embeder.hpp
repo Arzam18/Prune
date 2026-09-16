@@ -3,13 +3,13 @@
     __asm__(".section .rodata\n" \
     ".global " #buffername "\n" \
     ".type " #buffername ", @object\n" \
-    ".align 64\n" \
+    ".balign 64\n" \
     #buffername":\n" \
     ".incbin " #filename "\n" \
     #buffername"_end:\n" \
     ".global "#buffername"_size\n" \
     ".type "#buffername"_size, @object\n" \
-    ".align 64\n" \
+    ".balign 64\n" \
     #buffername"_size:\n" \
     ".int "#buffername"_end - "#buffername"\n"\
     );
@@ -42,12 +42,12 @@ extern "C"{\
 #define BINARY_ASM_INCLUDE(filename, buffername) \
     __asm__(".section .rdata\n" \
     ".global " #buffername "\n" \
-    ".align 64\n" \
+    ".balign 64\n" \
     "" #buffername":\n" \
     ".incbin " #filename "\n" \
     "" #buffername"_end:\n" \
     ".globl " #buffername"_size\n" \
-    ".align 64\n" \
+    ".balign 64\n" \
     "" #buffername"_size:\n" \
     ".long " #buffername"_end - " #buffername "\n"\
     );
