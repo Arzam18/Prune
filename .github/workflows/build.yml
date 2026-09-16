@@ -16,9 +16,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
-      # Locate the Makefile by content rather than assuming its path -- the same lesson
-      # learned with Halogen. ADDOPTION is a variable name unique to Prune's Makefile.
+      - name: Extract engine version
+        run: |
+          VERSION=$(git describe --tags --always 2>/dev/null || echo "dev-${GITHUB_SHA::7}")
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "Building Prune version: ${VERSION}"
+
       - name: Locate Prune Makefile
         id: locate-makefile
         run: |
@@ -34,13 +39,6 @@ jobs:
           MAKEFILE_DIR=$(dirname "$MAKEFILE_PATH")
           echo "makefile_dir=$MAKEFILE_DIR" >> "$GITHUB_OUTPUT"
 
-      # `permute` is a build-time HOST TOOL: the Makefile compiles it and then executes it
-      # (`./permute ... model.bin`) to pre-process the network weights before the engine
-      # itself is built -- the same "tool must run on the build machine, not the target"
-      # issue solved for Halogen via HOSTCXX. Here there is no separate host-compiler
-      # variable, and permute's own recipe doesn't even pass ADDOPTION/CPPFLAGS, so it must
-      # be built with the host's native compiler (its x86_64 SIMD branch is exactly right
-      # for that) BEFORE the NDK compiler is introduced at all -- never cross-compiled.
       - name: Build permute and generate model.bin (host-native)
         run: |
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
@@ -62,18 +60,6 @@ jobs:
           ls "$TOOLCHAIN_BIN" | grep "aarch64-linux-android24-clang"
           "$TOOLCHAIN_BIN/aarch64-linux-android24-clang++" --version
 
-      # model.bin already exists and is newer than its prerequisites (permute, the
-      # downloaded net) from the host-native step above, so this `all` build does NOT
-      # re-trigger permute's recipe -- it only compiles/links the engine's own sources,
-      # which DO honor ADDOPTION/CPPFLAGS, so __ARM_NEON__ reaches every one of them.
-      # Bionic (Android's libc) has never had a separate pthread library -- pthread
-      # functions have always lived directly in libc.so. Older NDKs shipped an empty
-      # stub libpthread.so/.a purely so legacy build systems that unconditionally pass
-      # -lpthread wouldn't break; NDK r23+ removed those stubs. This Makefile bakes
-      # -lpthread into LDFLAGS unconditionally (combined via `override LDFLAGS +=`, so
-      # it can't be removed from the command line), so an empty stub archive is created
-      # here and its directory added to the link search path -- -lpthread then resolves
-      # to nothing, which is correct, since the real symbols are already in libc.
       - name: Create pthread stub library
         id: pthread-stub
         run: |
@@ -83,7 +69,7 @@ jobs:
           echo "stub_dir=$STUB_DIR" >> "$GITHUB_OUTPUT"
           ls -la "$STUB_DIR"
 
-      - name: Build Prune (arm64, armv8-a)
+      - name: Build Prune (ARM64 v8-A)
         run: |
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
           make all \
@@ -91,37 +77,44 @@ jobs:
             CC="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang" \
             ARCH=armv8-a \
             ADDOPTION="-D__ARM_NEON__=1 -fPIE" \
-            LDFLAGS="-static-pie -L${{ steps.pthread-stub.outputs.stub_dir }}" \
-            EXE=prune-android \
+            LDFLAGS="-static-pie -static-libstdc++ -L${{ steps.pthread-stub.outputs.stub_dir }}" \
+            EXE=prune-${{ env.VERSION }}-android-arm64-v8a \
             -j"$(nproc)"
 
-      # DroidFish executes the engine directly with no way to set LD_LIBRARY_PATH, and
-      # Android refuses to exec a non-PIE binary since API 21 -- static-pie above should
-      # produce a self-contained, PIE-compatible executable. Confirm both properties here.
-      - name: Confirm binary is PIE and has no shared library dependencies
+      - name: Build Prune (ARM64 DotProd - Cortex A76+)
         run: |
-          BIN="${{ steps.locate-makefile.outputs.makefile_dir }}/prune-android"
-          find "${{ steps.locate-makefile.outputs.makefile_dir }}" -maxdepth 1 -iname "prune*" -type f
-          file "$BIN"
-          echo "--- ELF header type ---"
-          readelf -h "$BIN" | grep -i type
-          echo "--- Dynamic section (should show no NEEDED entries) ---"
-          readelf -d "$BIN" || echo "readelf reports no dynamic section -- fully static, good"
+          cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
+          rm -f *.o src/*.o obj/*.o
+          make all \
+            CXX="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang++" \
+            CC="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang" \
+            ARCH=armv8.2-a+dotprod \
+            ADDOPTION="-D__ARM_NEON__=1 -march=armv8.2-a+dotprod -fPIE" \
+            LDFLAGS="-static-pie -static-libstdc++ -L${{ steps.pthread-stub.outputs.stub_dir }}" \
+            EXE=prune-${{ env.VERSION }}-android-arm64-dotprod \
+            -j"$(nproc)"
 
-      - name: Upload build artifact
+      - name: Confirm binaries are PIE and have no shared library dependencies
+        run: |
+          cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
+          ls -lh prune-${{ env.VERSION }}-android-*
+          file prune-${{ env.VERSION }}-android-*
+          readelf -d prune-${{ env.VERSION }}-android-arm64-v8a || echo "No dynamic section"
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: prune-android-arm64
-          path: ${{ steps.locate-makefile.outputs.makefile_dir }}/prune-android
+          name: prune-${{ env.VERSION }}-android-binaries
+          path: ${{ steps.locate-makefile.outputs.makefile_dir }}/prune-${{ env.VERSION }}-android-*
           if-no-files-found: error
 
       - name: Create prerelease
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: android-build-${{ github.run_number }}
-          name: Prune Android build ${{ github.run_number }}
+          tag_name: ${{ env.VERSION }}-android
+          name: Prune ${{ env.VERSION }} (Android)
           prerelease: true
-          files: ${{ steps.locate-makefile.outputs.makefile_dir }}/prune-android
+          files: ${{ steps.locate-makefile.outputs.makefile_dir }}/prune-${{ env.VERSION }}-android-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
