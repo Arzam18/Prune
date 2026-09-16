@@ -66,6 +66,23 @@ jobs:
       # downloaded net) from the host-native step above, so this `all` build does NOT
       # re-trigger permute's recipe -- it only compiles/links the engine's own sources,
       # which DO honor ADDOPTION/CPPFLAGS, so __ARM_NEON__ reaches every one of them.
+      # Bionic (Android's libc) has never had a separate pthread library -- pthread
+      # functions have always lived directly in libc.so. Older NDKs shipped an empty
+      # stub libpthread.so/.a purely so legacy build systems that unconditionally pass
+      # -lpthread wouldn't break; NDK r23+ removed those stubs. This Makefile bakes
+      # -lpthread into LDFLAGS unconditionally (combined via `override LDFLAGS +=`, so
+      # it can't be removed from the command line), so an empty stub archive is created
+      # here and its directory added to the link search path -- -lpthread then resolves
+      # to nothing, which is correct, since the real symbols are already in libc.
+      - name: Create pthread stub library
+        id: pthread-stub
+        run: |
+          STUB_DIR="$RUNNER_TEMP/android-stub-libs"
+          mkdir -p "$STUB_DIR"
+          "${{ steps.find-clang.outputs.toolchain_bin }}/llvm-ar" rcs "$STUB_DIR/libpthread.a"
+          echo "stub_dir=$STUB_DIR" >> "$GITHUB_OUTPUT"
+          ls -la "$STUB_DIR"
+
       - name: Build Prune (arm64, armv8-a)
         run: |
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
@@ -74,7 +91,7 @@ jobs:
             CC="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang" \
             ARCH=armv8-a \
             ADDOPTION="-D__ARM_NEON__=1 -fPIE" \
-            LDFLAGS="-static-pie" \
+            LDFLAGS="-static-pie -L${{ steps.pthread-stub.outputs.stub_dir }}" \
             EXE=prune-android \
             -j"$(nproc)"
 
