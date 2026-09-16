@@ -2,6 +2,7 @@
 #include "Const.hpp"
 #include "GameState.hpp"
 #include "Move.hpp"
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <cmath>
@@ -179,7 +180,15 @@ void transpositionTable::reinit(size_t count){
 #ifdef _WIN32
     table = (Cluster*)(_aligned_malloc(size, alignment));
 #else
-    table = (Cluster*)std::aligned_alloc(alignment, size);
+    // std::aligned_alloc requires Android API 28+ (Bionic doesn't provide it before
+    // that), but this project targets API 24 -- posix_memalign is available on every
+    // Android API level and every POSIX platform, so it's used here instead.
+    {
+        void* aligned_ptr = nullptr;
+        if(posix_memalign(&aligned_ptr, alignment, size) != 0)
+            aligned_ptr = nullptr;
+        table = (Cluster*)aligned_ptr;
+    }
 #endif
 #ifdef MADV_HUGEPAGE
     madvise(table, count*sizeof(Cluster), MADV_HUGEPAGE);
