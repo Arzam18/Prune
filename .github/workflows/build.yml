@@ -34,6 +34,19 @@ jobs:
           MAKEFILE_DIR=$(dirname "$MAKEFILE_PATH")
           echo "makefile_dir=$MAKEFILE_DIR" >> "$GITHUB_OUTPUT"
 
+      # `permute` is a build-time HOST TOOL: the Makefile compiles it and then executes it
+      # (`./permute ... model.bin`) to pre-process the network weights before the engine
+      # itself is built -- the same "tool must run on the build machine, not the target"
+      # issue solved for Halogen via HOSTCXX. Here there is no separate host-compiler
+      # variable, and permute's own recipe doesn't even pass ADDOPTION/CPPFLAGS, so it must
+      # be built with the host's native compiler (its x86_64 SIMD branch is exactly right
+      # for that) BEFORE the NDK compiler is introduced at all -- never cross-compiled.
+      - name: Build permute and generate model.bin (host-native)
+        run: |
+          cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
+          make model.bin
+          ls -la model.bin
+
       - name: Set up Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
@@ -49,15 +62,14 @@ jobs:
           ls "$TOOLCHAIN_BIN" | grep "aarch64-linux-android24-clang"
           "$TOOLCHAIN_BIN/aarch64-linux-android24-clang++" --version
 
-      # ADDOPTION is the Makefile's own hook for extra compiler flags -- used here to define
-      # __ARM_NEON__ (the code's chosen macro name, which doesn't match what AArch64 clang
-      # actually predefines: __ARM_NEON), and to add -fPIE for the static-pie link below.
-      # LDFLAGS gets combined with the Makefile's own -lpthread via its `override ... +=`,
-      # not replaced, so -static-pie doesn't need -lpthread appended manually.
+      # model.bin already exists and is newer than its prerequisites (permute, the
+      # downloaded net) from the host-native step above, so this `all` build does NOT
+      # re-trigger permute's recipe -- it only compiles/links the engine's own sources,
+      # which DO honor ADDOPTION/CPPFLAGS, so __ARM_NEON__ reaches every one of them.
       - name: Build Prune (arm64, armv8-a)
         run: |
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
-          make \
+          make all \
             CXX="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang++" \
             CC="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang" \
             ARCH=armv8-a \
