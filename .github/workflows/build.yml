@@ -1,162 +1,98 @@
-name: Prune Android Build
+name: Build Prune for Android
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ "main", "master" ]
-  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: {}
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    name: Prune Android
-    runs-on: ubuntu-24.04
+  build-android:
+    runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Clone Repository
-      uses: actions/checkout@v4
+      # Locate the Makefile by content rather than assuming its path -- the same lesson
+      # learned with Halogen. ADDOPTION is a variable name unique to Prune's Makefile.
+      - name: Locate Prune Makefile
+        id: locate-makefile
+        run: |
+          echo "All Makefiles found in repo:"
+          find . -iname "Makefile"
+          echo "---"
+          MAKEFILE_PATH=$(grep -rl "ADDOPTION" --include="Makefile" . | head -n1)
+          if [ -z "$MAKEFILE_PATH" ]; then
+            echo "ERROR: no Makefile containing 'ADDOPTION' was found."
+            exit 1
+          fi
+          echo "Using Makefile: $MAKEFILE_PATH"
+          MAKEFILE_DIR=$(dirname "$MAKEFILE_PATH")
+          echo "makefile_dir=$MAKEFILE_DIR" >> "$GITHUB_OUTPUT"
 
-    - name: Set up Android NDK & QEMU Environment
-      run: |
-        sudo apt update && sudo apt install -y qemu-user
-        NDKV="27.2.12479018"
-        ANDROID_ROOT=/usr/local/lib/android
-        ANDROID_SDK_ROOT=$ANDROID_ROOT/sdk
-        SDKMANAGER=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager
-        echo "y" | $SDKMANAGER "ndk;$NDKV"
-        ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDKV
-        ANDROID_NDK_BIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
-        
-        # Set NDK Toolchain Environment Variables
-        echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
-        echo "TOOLCHAIN_PREFIX=$ANDROID_NDK_BIN/aarch64-linux-android35-" >> $GITHUB_ENV
+      - name: Set up Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: false
 
-    - name: Download and Patch sse2neon Header
-      run: |
-        curl -sL https://raw.githubusercontent.com/DLTcollab/sse2neon/master/sse2neon.h -o sse2neon.h
-        
-        # Patch sse2neon.h to remove the unused 'bound' parameter names to satisfy -Werror
-        python3 -c '
-        with open("sse2neon.h", "r", encoding="utf-8") as f:
-            content = f.read()
+      - name: Locate NDK aarch64 toolchain
+        id: find-clang
+        run: |
+          TOOLCHAIN_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "toolchain_bin=$TOOLCHAIN_BIN" >> "$GITHUB_OUTPUT"
+          ls "$TOOLCHAIN_BIN" | grep "aarch64-linux-android24-clang"
+          "$TOOLCHAIN_BIN/aarch64-linux-android24-clang++" --version
 
-        content = content.replace(
-            "static uint16_t _sse2neon_aggregate_equal_ordered_8x16(int bound,",
-            "static uint16_t _sse2neon_aggregate_equal_ordered_8x16(int,"
-        )
-        content = content.replace(
-            "static uint16_t _sse2neon_aggregate_equal_ordered_16x8(int bound,",
-            "static uint16_t _sse2neon_aggregate_equal_ordered_16x8(int,"
-        )
+      # ADDOPTION is the Makefile's own hook for extra compiler flags -- used here to define
+      # __ARM_NEON__ (the code's chosen macro name, which doesn't match what AArch64 clang
+      # actually predefines: __ARM_NEON), and to add -fPIE for the static-pie link below.
+      # LDFLAGS gets combined with the Makefile's own -lpthread via its `override ... +=`,
+      # not replaced, so -static-pie doesn't need -lpthread appended manually.
+      - name: Build Prune (arm64, armv8-a)
+        run: |
+          cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
+          make \
+            CXX="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang++" \
+            CC="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang" \
+            ARCH=armv8-a \
+            ADDOPTION="-D__ARM_NEON__=1 -fPIE" \
+            LDFLAGS="-static-pie" \
+            EXE=prune-android \
+            -j"$(nproc)"
 
-        with open("sse2neon.h", "w", encoding="utf-8") as f:
-            f.write(content)
-        print("Patched sse2neon.h successfully!")
-        '
-        mkdir -p core && cp sse2neon.h core/
+      # DroidFish executes the engine directly with no way to set LD_LIBRARY_PATH, and
+      # Android refuses to exec a non-PIE binary since API 21 -- static-pie above should
+      # produce a self-contained, PIE-compatible executable. Confirm both properties here.
+      - name: Confirm binary is PIE and has no shared library dependencies
+        run: |
+          BIN="${{ steps.locate-makefile.outputs.makefile_dir }}/prune-android"
+          find "${{ steps.locate-makefile.outputs.makefile_dir }}" -maxdepth 1 -iname "prune*" -type f
+          file "$BIN"
+          echo "--- ELF header type ---"
+          readelf -h "$BIN" | grep -i type
+          echo "--- Dynamic section (should show no NEEDED entries) ---"
+          readelf -d "$BIN" || echo "readelf reports no dynamic section -- fully static, good"
 
-    - name: Patch SIMD Headers and Makefile for Android
-      run: |
-        cat << 'EOF' > patch_simd.py
-        import os
-        import re
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prune-android-arm64
+          path: ${{ steps.locate-makefile.outputs.makefile_dir }}/prune-android
+          if-no-files-found: error
 
-        def patch_file(path):
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-
-            original = content
-
-            # Safely replace ANY x86 intrinsic header
-            replacement = """#if defined(__aarch64__) || defined(__ARM_NEON)
-        #include "sse2neon.h"
-        #else
-        #include <immintrin.h>
-        #endif"""
-            content = re.sub(r'#include\s*<[a-zA-Z0-9_]*intrin\.h>', replacement, content)
-
-            # Specifically force sse2neon and definitions at the very top of simd_definitions.hpp
-            if "simd_definitions.hpp" in path:
-                header_injection = """#if defined(__aarch64__) || defined(__ARM_NEON)
-        #ifndef __SSE2__
-        #define __SSE2__ 1
-        #endif
-        #ifndef __SSSE3__
-        #define __SSSE3__ 1
-        #endif
-        #ifndef __SSE4_1__
-        #define __SSE4_1__ 1
-        #endif
-        #include "sse2neon.h"
-        #endif
-        """
-                if 'sse2neon.h' not in content:
-                    content = header_injection + content
-
-            # Bypass the strict SIMD #error guard in simd_definitions.hpp
-            if "This code requires at least SSE2 (x86) or NEON (ARM) support" in content:
-                content = content.replace(
-                    '#error "This code requires at least SSE2 (x86) or NEON (ARM) support"',
-                    '// #error "Bypassed for Android cross-compilation"'
-                )
-
-            # Remove incompatible -m64 flags from Makefiles during cross-compilation
-            if path.endswith("Makefile") or "Makefile" in os.path.basename(path):
-                content = content.replace("-m64", "")
-
-            if content != original:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                print(f"Patched: {path}")
-
-        for root, dirs, files in os.walk("."):
-            for file in files:
-                if file.endswith((".h", ".hpp", ".cpp", ".c", "Makefile")) or file == "Makefile":
-                    patch_file(os.path.join(root, file))
-        EOF
-        python3 patch_simd.py
-        # Copy patched headers into core directory so both core and tools see them
-        cp simd_definitions.hpp core/ 2>/dev/null || true
-
-    - name: Compile Prune for Android (aarch64)
-      run: |
-        export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
-        
-        # Prune's architecture requires running Make inside the core/ directory
-        cd core || true
-        
-        # Compile targeting Android ARM64
-        make prune \
-          CXX="${{ env.TOOLCHAIN_PREFIX }}clang++" \
-          ARCH="armv8-a" \
-          CXXFLAGS="-O3 -funroll-loops -flto -std=c++20 -stdlib=libc++ -fexperimental-library -DNDEBUG -pthread -D__SSE4_1__ -D__SSSE3__ -D__SSE2__ -include sse2neon.h" \
-          CFLAGS="-D__SSE4_1__ -D__SSSE3__ -D__SSE2__ -include sse2neon.h" \
-          LDFLAGS="-fuse-ld=lld -static-libstdc++"
-          
-        # Move binary out to the root directory for benchmarking and artifacts
-        mv prune ../prune-android-arm64 || true
-        cd ..
-
-    - name: Bench
-      run: |
-        # Prune's bench command tests 48 positions
-        qemu-aarch64 ./prune-android-arm64 bench || true
-
-    - name: Upload Binary Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: prune-android-arm64
-        path: ./prune-android-arm64
-
-    - name: Create GitHub Prerelease
-      if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: android-build-${{ github.run_number }}
-        name: Prune Android Build ${{ github.run_number }}
-        prerelease: true
-        files: ./prune-android-arm64
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create prerelease
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-build-${{ github.run_number }}
+          name: Prune Android build ${{ github.run_number }}
+          prerelease: true
+          files: ${{ steps.locate-makefile.outputs.makefile_dir }}/prune-android
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
