@@ -24,17 +24,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang curl file binutils python3
 
-      - name: Locate Android NDK
-        id: ndk
+      - name: Install Android NDK 27.2.12479018
         shell: bash
         run: |
           set -euxo pipefail
-          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          export ANDROID_HOME="$SDK_ROOT"
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
+
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found under $SDK_ROOT/cmdline-tools"
+            find "$SDK_ROOT" -maxdepth 4 -type f -name sdkmanager -print || true
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install \
+            "platform-tools" \
+            "platforms;android-24" \
+            "ndk;27.2.12479018"
+
           NDK="$SDK_ROOT/ndk/27.2.12479018"
           test -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
-          echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
           echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "NDK=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++" --version
 
       - name: Verify Prune source layout
         working-directory: core
