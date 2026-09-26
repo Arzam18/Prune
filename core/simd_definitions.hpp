@@ -4,14 +4,15 @@
 
 #if defined(__x86_64__)
     #include <immintrin.h>
-
-#elif defined(__ARM_NEON__)
+    #define PRUNE_X86_SIMD 1
+#elif defined(__aarch64__) || defined(__ARM_NEON__) || defined(__ARM_NEON)
     #include <arm_neon.h>
-    // Make sure no x86 features are on
+    // AArch64 always has the baseline NEON/AdvSIMD instruction set.
+    #define PRUNE_ARM_NEON 1
+    // Make sure no x86 features are selected on the ARM path.
     #undef __AVX512F__
     #undef __AVX2__
     #undef __SSE2__
-
 #endif
 
 #define dbyte int16_t
@@ -31,7 +32,7 @@
     using simdhalf = int64_t;
     #define MM _mm
     #define SIZE 128
-#elif defined(__ARM_NEON__)
+#elif defined(PRUNE_ARM_NEON)
     // NEON behaves a bit differently than x86 simd
     using simdhalf = int8x8_t;
     #define SIZE 128
@@ -45,7 +46,7 @@
 #endif
 
 
-#ifdef __ARM_NEON__
+#ifdef PRUNE_ARM_NEON
     // On NEON each width maps to its own register type so we have to do everything explicitly
     template<int size> struct simd_register;
     template<> struct simd_register<8>  { using type = int8x16_t; };
@@ -70,7 +71,7 @@ constexpr int I8inI32 = nbTypes<int32_t, int8_t>;
 #define ADDSIZE(func_name) CONCAT(func_name, SIZE)
 
 // SIMD utility functions
-#ifdef __ARM_NEON__
+#ifdef PRUNE_ARM_NEON
 inline simd<16> simd16_zero(){
     return vdupq_n_s16(0);
 }
