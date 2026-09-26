@@ -1,6 +1,6 @@
 #include "simd_definitions.hpp"
 
-#ifdef __ARM_NEON__
+#ifdef PRUNE_ARM_NEON
 //  ARM NEON backend
 
 simd<32> simdint_add(const simd<32>& a, const simd<32>& b) {
