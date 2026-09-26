@@ -1,0 +1,175 @@
+name: Build Prune for Android ARM64 NEON
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'core/**'
+      - 'Fathom/**'
+      - '.github/workflows/android.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang curl file binutils python3
+
+      - name: Locate Android NDK
+        id: ndk
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          NDK="$SDK_ROOT/ndk/27.2.12479018"
+          test -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+          echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
+          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+
+      - name: Verify Prune source layout
+        working-directory: core
+        run: |
+          set -euxo pipefail
+          test -f Makefile
+          test -f simd_definitions.hpp
+          test -f simd_definitions.cpp
+          test -f embeder.hpp
+          test -f embeder.cpp
+          test -f nn-name.txt
+          test -f magics.out
+
+      - name: Show ARM SIMD configuration
+        run: |
+          set -euxo pipefail
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++" \
+            -march=armv8.2-a+dotprod -dM -E -x c++ /dev/null \
+            | grep -E '__aarch64__|__ARM_NEON|__ARM_FEATURE_DOTPROD' || true
+
+      - name: Build host permuter
+        working-directory: core
+        run: |
+          set -euxo pipefail
+          clang++ -std=gnu++17 -O3 -flto -funroll-loops \
+            -D_CRT_SECURE_NO_WARNINGS \
+            -o permute_host permute.cpp
+
+      - name: Download Prune network
+        working-directory: core
+        run: |
+          set -euxo pipefail
+          RELEASE_TAG="$(head -n 1 nn-name.txt | tr -d '\r\n')"
+          NETNAME="$(tail -n 1 nn-name.txt | tr -d '\r\n')"
+          test -n "$RELEASE_TAG"
+          test -n "$NETNAME"
+          URL="https://github.com/tgirolami09/Prune-nets/releases/download/${RELEASE_TAG}/${NETNAME}.bin"
+          echo "Network: $NETNAME"
+          echo "Release: $RELEASE_TAG"
+          curl --fail --location --retry 3 -o "${NETNAME}.bin" "$URL"
+          test -s "${NETNAME}.bin"
+          ls -lh "${NETNAME}.bin"
+
+      - name: Generate embedded model
+        working-directory: core
+        run: |
+          set -euxo pipefail
+          NETNAME="$(tail -n 1 nn-name.txt | tr -d '\r\n')"
+          ./permute_host "${NETNAME}.bin" model.bin
+          test -s model.bin
+          ls -lh model.bin
+
+      - name: Compile ARM64 NEON SIMD smoke test
+        run: |
+          set -euxo pipefail
+          cat > /tmp/neon_smoke.cpp <<'CPP'
+          #include <arm_neon.h>
+          #include <cstdint>
+          int main() {
+              const uint8x8_t a = {1,2,3,4,5,6,7,8};
+              const uint8x8_t b = vadd_u8(a, a);
+              return vget_lane_u8(b, 0) == 2 ? 0 : 1;
+          }
+          CPP
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++" \
+            -std=gnu++17 -march=armv8.2-a+dotprod \
+            -c /tmp/neon_smoke.cpp -o /tmp/neon_smoke.o
+
+      - name: Clean previous build objects
+        working-directory: core
+        run: |
+          set -euxo pipefail
+          make clean || true
+          rm -f prune-android-arm64 prune-android-arm64-* *.d
+
+      - name: Build Prune Android ARM64
+        working-directory: core
+        run: |
+          set -euxo pipefail
+          ANDROID_CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+          ANDROID_CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          make -j2 prune \
+            CXX="$ANDROID_CXX" \
+            CC="$ANDROID_CC" \
+            ANDROID=true \
+            ARCH="armv8.2-a+dotprod" \
+            CPUSET="unknow" \
+            ADDOPTION="-D__ARM_NEON__ -flax-vector-conversions" \
+            OPT="-O3 -flto -funroll-loops" \
+            LDFLAGS="-static-libstdc++ -Wl,-z,max-page-size=16384" \
+            EXE="prune-android-arm64"
+
+      - name: Verify Android binary
+        working-directory: core
+        run: |
+          set -euxo pipefail
+          file prune-android-arm64
+          readelf -h prune-android-arm64 | grep -E 'Class:|Machine:|Type:'
+          readelf -h prune-android-arm64 | grep -q 'Machine:.*AArch64'
+          readelf -l prune-android-arm64 | grep -q 'GNU_STACK'
+          readelf -s prune-android-arm64 | grep -q 'baseModel' || true
+          if strings prune-android-arm64 | grep -q 'x86'; then
+            echo 'Warning: x86 string found; not treated as a failure.'
+          fi
+
+      - name: Check ARM SIMD instructions
+        working-directory: core
+        run: |
+          set -euxo pipefail
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objdump" -d prune-android-arm64 > /tmp/prune.disasm
+          grep -E '\b(addv|saddlv|sdot|usdot|smull|sqdmulh|sqxtn|uqxtn|smin|smax|umin|umax)\b' /tmp/prune.disasm | head -20 || true
+
+      - name: Check embedded network
+        working-directory: core
+        run: |
+          set -euxo pipefail
+          test -s model.bin
+          test -s magics.out
+          strings prune-android-arm64 | grep -q 'Prune' || true
+          sha256sum prune-android-arm64
+          ls -lh prune-android-arm64
+
+      - name: Prepare single binary artifact
+        working-directory: core
+        run: |
+          set -euxo pipefail
+          mkdir -p ../artifact
+          cp prune-android-arm64 ../artifact/prune-android-arm64
+          chmod +x ../artifact/prune-android-arm64
+          ls -lh ../artifact/prune-android-arm64
+
+      - name: Upload single binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: prune-android-arm64
+          path: artifact/prune-android-arm64
+          if-no-files-found: error
+          compression-level: 0
