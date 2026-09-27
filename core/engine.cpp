@@ -104,6 +104,21 @@ void manageInput(){
         string com;
         if(!getline(cin, com))
             com = "quit";
+
+        // UCI is line based, and some GUI/engine front-ends use CRLF.
+        // getline() removes only '\\n', leaving a trailing '\\r' behind.
+        // Normalize it here so commands such as "uci\\r" and "isready\\r"
+        // are accepted exactly like their LF-only equivalents.
+        while(!com.empty() && (com.back() == '\r' || com.back() == '\n'))
+            com.pop_back();
+
+        // Be tolerant of harmless leading/trailing whitespace from GUI pipes.
+        const auto first = com.find_first_not_of(" \\t");
+        if(first == string::npos)
+            continue;
+        const auto last = com.find_last_not_of(" \\t");
+        com = com.substr(first, last - first + 1);
+
         if(com == "stop"){
             bestMoveFinder.running = false;
         }else if(com == "isready"){
@@ -498,6 +513,15 @@ void manageSearch(){
                 for(int i=0; i<(int)parsed.size(); i++){
                     if(parsed[i].first == "name"){
                         bool incr=true;
+
+                        // Every supported non-button option has a following
+                        // "value" field. Ignore malformed/incomplete GUI
+                        // commands instead of throwing from stoi() or indexing
+                        // past the parsed command.
+                        const bool isButton = (parsed[i].second == "Clear Hash");
+                        if(!isButton && i + 1 >= (int)parsed.size())
+                            continue;
+
                         if(parsed[i].second == "Hash")
                             bestMoveFinder.reinit(stoi(parsed[i+1].second)*hashMul);
                         else if(parsed[i].second == "Move Overhead")
