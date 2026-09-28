@@ -89,7 +89,7 @@ public:
 int moveOverhead = 100;
 const int alloted_space=64*hashMul;
 Perft doPerft;
-BestMoveFinder bestMoveFinder(alloted_space);
+BestMoveFinder* bestMoveFinder = nullptr;
 
 const int sizeQ=128;
 string inpQueue[sizeQ];
@@ -112,7 +112,7 @@ void manageInput(){
         string com;
 
         if(!getline(cin, com)){
-            bestMoveFinder.running=false;
+            bestMoveFinder->running=false;
             stop_all=true;
             cv_new_command.notify_one();
             break;
@@ -140,7 +140,7 @@ void manageInput(){
         }
 
         if(com=="stop"){
-            bestMoveFinder.running=false;
+            bestMoveFinder->running=false;
             continue;
         }
 
@@ -150,7 +150,7 @@ void manageInput(){
 
                 cv_command.wait(lock, [&]{
                     return !exec_command ||
-                           bestMoveFinder.running ||
+                           bestMoveFinder->running ||
                            stop_all;
                 });
             }
@@ -163,7 +163,7 @@ void manageInput(){
         }
 
         if(com=="quit"){
-            bestMoveFinder.running=false;
+            bestMoveFinder->running=false;
             stop_all=true;
             cv_new_command.notify_one();
             continue;
@@ -408,7 +408,7 @@ bestMoveResponse goCommand(
                 color
             );
 
-            return bestMoveFinder.bestMove<0>(
+            return bestMoveFinder->bestMove<0>(
                 state.root,
                 tm,
                 state.movesFromRoot
@@ -417,7 +417,7 @@ bestMoveResponse goCommand(
         }else if(args[0].first=="movetime"){
             int movetime=stoi(args[0].second);
 
-            return bestMoveFinder.bestMove<0>(
+            return bestMoveFinder->bestMove<0>(
                 state.root,
                 TM(movetime,movetime),
                 state.movesFromRoot,
@@ -427,7 +427,7 @@ bestMoveResponse goCommand(
         }else if(args[0].first=="nodes"){
             int nodes=stoi(args[0].second);
 
-            return bestMoveFinder.bestMove<1>(
+            return bestMoveFinder->bestMove<1>(
                 state.root,
                 TM(nodes,nodes),
                 state.movesFromRoot,
@@ -437,7 +437,7 @@ bestMoveResponse goCommand(
         }else if(args[0].first=="depth"){
             int depth=stoi(args[0].second);
 
-            return bestMoveFinder.bestMove<2>(
+            return bestMoveFinder->bestMove<2>(
                 state.root,
                 TM(depth,depth),
                 state.movesFromRoot,
@@ -446,7 +446,7 @@ bestMoveResponse goCommand(
         }
     }
 
-    return bestMoveFinder.bestMove<2>(
+    return bestMoveFinder->bestMove<2>(
         state.root,
         TM(200,200),
         state.movesFromRoot,
@@ -790,7 +790,7 @@ void manageSearch(){
 
             if(command=="runQ"){
 
-                bestMoveFinder.testQuiescenceSearch(
+                bestMoveFinder->testQuiescenceSearch(
                     state->root
                 );
 
@@ -935,7 +935,7 @@ void manageSearch(){
 
             }else if(command=="ucinewgame"){
 
-                bestMoveFinder.clear();
+                bestMoveFinder->clear();
                 lastMove=nullMove;
 
             }else if(command=="version"){
@@ -997,7 +997,7 @@ void manageSearch(){
                         benches[idFen]
                     );
 
-                    bestMoveFinder.clear();
+                    bestMoveFinder->clear();
 
                     bool _;
 
@@ -1343,7 +1343,7 @@ void manageSearch(){
 
                     lastMove=ponder;
 
-                    bestMoveFinder.aging();
+                    bestMoveFinder->aging();
                 }
 
             }else if(command=="uci"){
@@ -1382,7 +1382,7 @@ void manageSearch(){
                         !optionValue.empty()
                     ){
 
-                        bestMoveFinder.reinit(
+                        bestMoveFinder->reinit(
                             stoull(optionValue)*hashMul
                         );
 
@@ -1397,7 +1397,7 @@ void manageSearch(){
 
                     }else if(opt=="clear hash"){
 
-                        bestMoveFinder.clear();
+                        bestMoveFinder->clear();
 
                     }else if(
                         opt=="threads" &&
@@ -1409,7 +1409,7 @@ void manageSearch(){
                             stoi(optionValue)
                         );
 
-                        bestMoveFinder.setThreads(
+                        bestMoveFinder->setThreads(
                             newT
                         );
 
@@ -1455,7 +1455,7 @@ void manageSearch(){
 
                     }else if(opt=="minimal"){
 
-                        bestMoveFinder.minimal=
+                        bestMoveFinder->minimal=
                             (
                                 optionValue=="true" ||
                                 optionValue=="1"
@@ -1718,6 +1718,11 @@ void manageSearch(){
 
 int main(int argc,char** argv){
 
+    // Construct the search engine only after main() has started.
+    // The previous global construction allocated/initialized the search
+    // engine before main(), which is undesirable for Android GUI startup.
+    bestMoveFinder = new BestMoveFinder(alloted_space);
+
     string UCI_instruction="programStart";
 
     thread t;
@@ -1762,4 +1767,7 @@ int main(int argc,char** argv){
         t.join();
 
     clear_table();
+
+    delete bestMoveFinder;
+    bestMoveFinder = nullptr;
 }
