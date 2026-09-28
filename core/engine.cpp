@@ -1718,56 +1718,42 @@ void manageSearch(){
 
 int main(int argc,char** argv){
 
-    // Construct the search engine only after main() has started.
-    // The previous global construction allocated/initialized the search
-    // engine before main(), which is undesirable for Android GUI startup.
-    bestMoveFinder = new BestMoveFinder(alloted_space);
-
     string UCI_instruction="programStart";
+
+    // Construct the search manager only after main() has started.
+    // This avoids doing the 64 MB transposition-table initialization
+    // during static/global initialization.
+    bestMoveFinder = new BestMoveFinder(alloted_space);
 
     thread t;
 
-    bool seeInput=true;
+    // Always keep the UCI stdin reader active for normal engine use.
+    // Command-line arguments are treated as initial commands, but they
+    // must not disable stdin. Some chess GUIs may launch an engine with
+    // arguments and still expect the normal UCI handshake on stdin/stdout.
+    for(int i=1;i<argc;i++){
 
-    if(argc>1){
+        if(endQ-startQ >= sizeQ)
+            break;
 
-        startQ=endQ=0;
-
-        seeInput=false;
-
-        if(
-            string(argv[argc-1])==
-            string("continue")
-        ){
-            argc--;
-            seeInput=true;
-        }
-
-        for(int i=1;i<argc;i++){
-
-            inpQueue[endQ%sizeQ]=argv[i];
-
-            endQ++;
-        }
-
-        if(!seeInput){
-
-            inpQueue[endQ%sizeQ]="quit";
-
-            endQ++;
-        }
+        inpQueue[endQ%sizeQ]=argv[i];
+        endQ++;
     }
 
-    if(seeInput)
-        t=thread(&manageInput);
+    t=thread(&manageInput);
 
     manageSearch();
 
-    if(seeInput)
+    stop_all=true;
+    cv_new_command.notify_one();
+
+    if(t.joinable())
         t.join();
+
+    delete bestMoveFinder;
+    bestMoveFinder=nullptr;
 
     clear_table();
 
-    delete bestMoveFinder;
-    bestMoveFinder = nullptr;
+    return 0;
 }
