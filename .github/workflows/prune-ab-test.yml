@@ -57,6 +57,11 @@ jobs:
             -o artifact/prune-uci-probe
           chmod +x artifact/prune-uci-probe
 
+          # Prune's Makefile automatically compiles every *.cpp in core/.
+          # Remove the standalone probe source before invoking that Makefile,
+          # otherwise both files define main().
+          rm -f core/uci_probe.cpp
+
       - name: Build real Prune with Stormphrax-style runtime flags
         working-directory: core
         shell: bash
