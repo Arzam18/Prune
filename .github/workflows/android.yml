@@ -1,0 +1,169 @@
+name: Build Real Prune for Android ARM64 NEON
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'core/**'
+      - 'Fathom/**'
+      - '.github/workflows/android-real.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang curl file binutils
+
+      - name: Install Android NDK 27.2.12479018
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          export ANDROID_HOME="$SDK_ROOT"
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
+
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+          test -n "$SDKMANAGER"
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install \
+            "platform-tools" \
+            "platforms;android-24" \
+            "ndk;27.2.12479018"
+
+          NDK="$SDK_ROOT/ndk/27.2.12479018"
+          CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+          CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+
+          test -x "$CXX"
+          test -x "$CC"
+
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_CXX=$CXX" >> "$GITHUB_ENV"
+          echo "ANDROID_CC=$CC" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------
+      # Build Prune's host-only network converter.
+      # This must NOT use the Android compiler.
+      # ------------------------------------------------------------
+      - name: Build host network converter
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
+          clang++ \
+            -std=gnu++17 \
+            -O3 \
+            -flto \
+            -funroll-loops \
+            -D_CRT_SECURE_NO_WARNINGS \
+            -o permute \
+            permute.cpp
+
+      # ------------------------------------------------------------
+      # Download and convert the exact network specified by Prune.
+      # ------------------------------------------------------------
+      - name: Prepare embedded NNUE network
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          RELEASE_TAG="$(head -n 1 nn-name.txt | tr -d '\r\n')"
+          NETNAME="$(tail -n 1 nn-name.txt | tr -d '\r\n')"
+
+          echo "Release: $RELEASE_TAG"
+          echo "Network: $NETNAME"
+
+          curl --fail --location --retry 5 --retry-delay 2 \
+            -o "${NETNAME}.bin" \
+            "https://github.com/tgirolami09/Prune-nets/releases/download/${RELEASE_TAG}/${NETNAME}.bin"
+
+          test -s "${NETNAME}.bin"
+
+          ./permute "${NETNAME}.bin" model.bin
+          test -s model.bin
+
+          ls -lh "${NETNAME}.bin" model.bin
+
+      # ------------------------------------------------------------
+      # Build the REAL Prune engine.
+      #
+      # The source is the original Prune engine. The only platform-level
+      # change here is the Android runtime/linker configuration proven by
+      # the A/B CET test.
+      # ------------------------------------------------------------
+      - name: Build real Prune ARM64 NEON
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          make clean || true
+
+          make -j2 prune \
+            CXX="$ANDROID_CXX" \
+            CC="$ANDROID_CC" \
+            ANDROID=true \
+            ARCH="armv8.2-a+dotprod" \
+            CPUSET="unknow" \
+            ADDOPTION="-D__ARM_NEON__ -flax-vector-conversions" \
+            OPT="-O3 -flto -funroll-loops" \
+            LDFLAGS="-static-libstdc++ -Wl,-Bstatic -lc++ -lc++abi -Wl,-Bdynamic -pthread -fuse-ld=lld -Wl,-z,max-page-size=16384" \
+            EXE="prune-android-arm64-neon"
+
+          test -x prune-android-arm64-neon
+          ls -lh prune-android-arm64-neon
+
+      # ------------------------------------------------------------
+      # ELF checks before uploading.
+      # ------------------------------------------------------------
+      - name: Inspect real Prune ELF
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          file prune-android-arm64-neon
+
+          echo '===== ELF HEADER ====='
+          readelf -h prune-android-arm64-neon
+
+          echo '===== PROGRAM HEADERS ====='
+          readelf -l prune-android-arm64-neon
+
+          echo '===== DYNAMIC SECTION ====='
+          readelf -d prune-android-arm64-neon || true
+
+          echo '===== NEEDED / RPATH / RUNPATH ====='
+          readelf -d prune-android-arm64-neon | grep -E 'NEEDED|RPATH|RUNPATH' || true
+
+          echo '===== FILE SIZE ====='
+          stat -c '%n %s bytes' prune-android-arm64-neon
+
+      - name: Package single binary
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p artifact
+          cp core/prune-android-arm64-neon artifact/
+          chmod +x artifact/prune-android-arm64-neon
+
+      - name: Upload real Prune
+        uses: actions/upload-artifact@v4
+        with:
+          name: prune-android-arm64-neon
+          path: artifact/prune-android-arm64-neon
+          if-no-files-found: error
+          compression-level: 0
