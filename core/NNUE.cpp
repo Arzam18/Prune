@@ -32,7 +32,7 @@ const int piecesThreat[nbPieces][nbPieces] = {
 };
 static_assert(sizeof(threatIndex)+sizeof(threatoffset) < 1024*1024, "way too big for nothing");
 
-__attribute__((constructor(106))) void initThreatIndices(){
+void initThreatIndices(){
     memset(threatIndex, 0xff, sizeof(threatIndex));
     int index=0;
     for(int _atk=0; _atk < (nbPieces-1)*2; _atk++){

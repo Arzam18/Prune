@@ -9,7 +9,7 @@ big zobrist[nbZobrist];
 static inline int posCastlingRook(bool side, bool c){
     return ((7-side*7)+c*(8*7));
 }
-__attribute__((constructor)) void init_zobrs(){
+void init_zobrs(){
     big state(42);
     for(int idz=0; idz<nbZobrist; idz++){
         if(idz == zobrCastle)idz++;

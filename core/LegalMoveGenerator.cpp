@@ -252,7 +252,6 @@ void clear_table(){
     free(tableMagic);
 }
 
-__attribute__((constructor(102)))
 void init_consts_legalMove(){
     PrecomputeKnightMoveData();
     load_table();

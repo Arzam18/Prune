@@ -17,7 +17,7 @@ big rook_full[64];
 big directions[64][64];
 big fullDir[64][64];
 
-__attribute__((constructor(101))) void init_lines(){
+void init_lines(){
     {
     big row = MAX_BIG >> (8*7+2) << 1;
     big col = 0x0001010101010100ULL;

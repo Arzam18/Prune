@@ -18,7 +18,7 @@ transpositionTable::transpositionTable(size_t count):table(NULL){
 }
 
 int LOG[maxDepth+1];
-__attribute__((constructor(101))) void init_log_table(){
+void init_log_table(){
     for(int i=0; i <= maxDepth; i++){
         LOG[i] = log(i+1)*10;
     }
