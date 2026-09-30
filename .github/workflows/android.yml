@@ -21,21 +21,30 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
 
       - name: Install Android NDK
         shell: bash
         run: |
           set -euo pipefail
+
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "ndk;27.2.12479018"
+
+          sdkmanager "ndk;27.2.12479018"
 
       - name: Set Android toolchain
         shell: bash
         run: |
           set -euo pipefail
+
           NDK="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
           LLVM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          test -x "$LLVM/aarch64-linux-android24-clang++"
+          test -x "$LLVM/readelf"
+
           echo "NDK=$NDK" >> "$GITHUB_ENV"
           echo "LLVM=$LLVM" >> "$GITHUB_ENV"
           echo "$LLVM" >> "$GITHUB_PATH"
@@ -44,14 +53,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f core/uci_probe.cpp core/uci_probe.o core/uci_probe.d
-          rm -f core/engine.o core/engine.d
+
+          rm -f core/uci_probe.cpp
+          rm -f core/uci_probe.o
+          rm -f core/uci_probe.d
+
+          rm -f core/engine.o
+          rm -f core/engine.d
 
       - name: Restore REAL Prune engine.cpp
         shell: bash
         run: |
           set -euo pipefail
+
           cd core
+
           cat > /tmp/prune-engine.cpp.gz.b64 <<'EOF'
           H4sIAMWRvWoC/+09bXfauNLf+RUue9pCQwAbknRDnD1Nt723J7csId3d55w0D8eAAV/AdmyTtDeb
           /35nJNmWjSzbJN2Xe5bspkEejeZNo5E0kr+z7MlqMzWVk/UmML+cVr6LCnw/8ExjzRcFG3dlJgoW
@@ -148,7 +164,7 @@ jobs:
           mlEJUaA5zW+D70X7+RQV61GP6V1lZEl8YqwXXSfHyPLxEvEHzsZ1Ta+GX/Iaon30aH9yrd8Xwp5v
           UExD8gimV76fqA3Z0Z+/Rj8pEoqWUgnMPfNJb+fp4kkWgEJ/TnMQXvcs8OfZs1l2GnRvn36qmVtM
           IaDgTpHHtCyfPP8Gv55P8K9GAV1ZLBO8UtYkQuZ+K8mcfNaXJIrccZSThReSEbIvM+ECFowZ8mM/
-          poOlvJ+q7Vd46rySP6ssoCNOV8/3tKY6y9PVls4oWS0gqdl+tMcmxwSfnjG1qX17xp6k+6dsuUCt
+          poOlvJ+q7Vd46rySP6ssoCNOVO8/3tKY6y9PVls4oWS0gqdl+tMcmxwSfnjG1qX17xp6k+6dsuUCt
           wt22kLPIcxTbpyWzo3CZmnBDM7AmRNobA6ckx8rzqTJxP2cty/KRyC5zIs+4+3ta9CebFj2ZNX1b
           09lMLNu8w1vRi8zyJ3jliWiJPevEiqRlINwPMybYtRhvf/r48cOncuJhaI7T91vwnwy8idszRJ4i
           wo2rG9Rr8LdkSJgj68pCiZJZ6mZNjlZfrY0v5PaVPVWw5B9CDi7TJ3+5p5/YgWHh84XlBwR/oYYu
@@ -174,7 +190,7 @@ jobs:
           Iciof3n5rggFCBZjEGXOJOE35E67qEYhIYfvixKcy0m8CupRh/9FGRKSXZP8bcCVg/fxGd48cysQ
           np0ktiez4UrsA5KdLmyWor7C6tfZMSZ/izIeSJSfGSyxd0VoiW5crjzZcilPcHQlwZNS/cgrQsvM
           hB9El1lHL5B6Yq4e+577J2Iv//q95H2fBP4p7CzvLCzEKYKUGP5Dj/kRgk5PGXjeSYEoCavA0VKi
-          ydFmYtVC5DmVhF4rXmEvdPB1l90MSRcV6hzfbVbUmn0z+PH98G3OsePUhe6NUtBPY8jTPK6SdmxN
+          ydFmYtVC5DmVhF4rXmEvdPB1l90MSRcV6hzfbVbUmn0z+PH98G3OsePUhe6NUtBPY8jTPK6SdmN
           v60Vk8WVKZhoINm1oUDjFViHDNUU7Jvhwj/y4Eurj+HOyywh7ZYfOnIsVRAaZNxqS/Ii4ne/CMIM
           utFZNEGiQHJEXmLEK1+eEIE0NuT7JJmdXmRdxH2N1zpu+bfD9AYhEL0zkwCqmXkQmJEV0rDTbYak
           EXKVONkBzV4/CjMcI9jSq2CFkjFQ+diCUmBXfLwuQnhx4vnPD0q1DZ9qgQQKICNw6G587q58fcfT
@@ -205,11 +221,13 @@ jobs:
           czy0c3GtE7Kt9NQaIfhbntLdg1FUqAV6Aiq3Aa4ZaCJqIYIA9omaay/A8I05e8zQ0iL2QpB6T4am
           +W8HE8kYDMmoGQU0p6EH1vlfI3nqlduzAAA=
           EOF
+
           base64 -d /tmp/prune-engine.cpp.gz.b64 | gzip -d > engine.cpp
           rm -f /tmp/prune-engine.cpp.gz.b64
 
           grep -q 'int main(int argc,char\*\* argv)' engine.cpp
           grep -q 'BestMoveFinder' engine.cpp
+
           if grep -q 'Prune-CET-Diagnostic' engine.cpp; then
             echo 'ERROR: diagnostic engine.cpp detected'
             exit 1
@@ -224,25 +242,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           cd core
+
           NETNAME="$(tail -1 nn-name.txt)"
           RELEASE="$(head -1 nn-name.txt)"
           URL="https://github.com/tgirolami09/Prune-nets/releases/download/$RELEASE/$NETNAME.bin"
+
           echo "Downloading $URL"
-          curl -fL --retry 3 --retry-delay 2 -o "$NETNAME.bin" "$URL"
+
+          curl -fL --retry 3 --retry-delay 2 \
+            -o "$NETNAME.bin" \
+            "$URL"
 
           clang++ -std=gnu++17 -O3 -flto -funroll-loops \
             -D_CRT_SECURE_NO_WARNINGS \
             -o permute permute.cpp
 
           ./permute "$NETNAME.bin" model.bin
+
           test -s model.bin
+
           echo "model.bin: $(stat -c%s model.bin) bytes"
 
       - name: Build REAL Prune Android ARM64 NEON
         shell: bash
         run: |
           set -euo pipefail
+
           cd core
 
           make clean || true
@@ -260,13 +287,16 @@ jobs:
             LDFLAGS='-static-libstdc++ -Wl,-Bstatic -lc++ -lc++abi -Wl,-Bdynamic -pthread -fuse-ld=lld -Wl,-z,max-page-size=16384'
 
           test -x prune
+
           cp prune ../prune-android-arm64-neon
 
       - name: Inspect ELF
         shell: bash
         run: |
           set -euo pipefail
+
           file prune-android-arm64-neon
+
           "$LLVM/readelf" -h prune-android-arm64-neon
           "$LLVM/readelf" -l prune-android-arm64-neon
           "$LLVM/readelf" -d prune-android-arm64-neon || true
@@ -275,7 +305,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf 'uci\nisready\nposition startpos\ngo depth 2\nquit\n' | ./prune-android-arm64-neon || true
+
+          printf 'uci\nisready\nposition startpos\ngo depth 2\nquit\n' \
+            | ./prune-android-arm64-neon || true
 
       - name: Upload real Prune binary
         uses: actions/upload-artifact@v4
