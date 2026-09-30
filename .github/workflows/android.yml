@@ -112,6 +112,12 @@ jobs:
 
           make clean || true
 
+          # The earlier A/B diagnostic probe is intentionally not part of
+          # the real Prune build. Prune's Makefile automatically compiles
+          # every .cpp in core/, so leaving uci_probe.cpp here creates a
+          # second main() and causes a duplicate-symbol linker failure.
+          rm -f uci_probe.cpp uci_probe.o
+
           make -j2 prune \
             CXX="$ANDROID_CXX" \
             CC="$ANDROID_CC" \
