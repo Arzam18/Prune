@@ -59,11 +59,17 @@ jobs:
 
           test -x "$LLVM/aarch64-linux-android24-clang++"
           test -x "$LLVM/aarch64-linux-android24-clang"
-          test -x "$LLVM/readelf"
+          test -x "$LLVM/llvm-readelf"
 
           echo "NDK=$NDK" >> "$GITHUB_ENV"
           echo "LLVM=$LLVM" >> "$GITHUB_ENV"
           echo "$LLVM" >> "$GITHUB_PATH"
+
+          echo "Android compiler:"
+          "$LLVM/aarch64-linux-android24-clang++" --version
+
+          echo "LLVM readelf:"
+          "$LLVM/llvm-readelf" --version
 
       # ============================================================
       # REMOVE DIAGNOSTIC BUILD FILES
@@ -184,10 +190,10 @@ jobs:
 
           file prune-android-arm64-neon
 
-          "$LLVM/readelf" -h prune-android-arm64-neon
-          "$LLVM/readelf" -l prune-android-arm64-neon
+          "$LLVM/llvm-readelf" -h prune-android-arm64-neon
+          "$LLVM/llvm-readelf" -l prune-android-arm64-neon
 
-          "$LLVM/readelf" -d prune-android-arm64-neon || true
+          "$LLVM/llvm-readelf" -d prune-android-arm64-neon || true
 
       # ============================================================
       # UCI SMOKE TEST
