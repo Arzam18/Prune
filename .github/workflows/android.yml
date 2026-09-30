@@ -53,10 +53,122 @@ jobs:
           echo "ANDROID_CXX=$CXX" >> "$GITHUB_ENV"
           echo "ANDROID_CC=$CC" >> "$GITHUB_ENV"
 
-      # ------------------------------------------------------------
-      # Build Prune's host-only network converter.
-      # This must NOT use the Android compiler.
-      # ------------------------------------------------------------
+      # The A/B test left a diagnostic engine.cpp in some working copies.
+      # Restore the complete REAL Prune engine.cpp before compiling.
+      - name: Restore real Prune engine.cpp
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd core
+          cat > /tmp/prune-engine.cpp.gz.b64 <<'EOF'
+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
++IXQi5PzMwyWy9gvSXsyFT+PeEzQL0d9EfyJ/P9C6MUnAsTY+WMCpZAnDw7IkeNpglLIk+cL5Mjx0EEp5KljCHLs5GxCIfTi0wpi7NwRBvEZqWLp9llZ4H/p
+QVF+fE1yTC37ipxiq0/Zw6wkVktfdJV4uD0dXDmT5Wi+MbzpyXoTmF/IgdllbR18GTG1CsJD84s5CR+LFqBSJE1uQ+Cm7QTW7OvIsRNHFjh4fOFDeDYDZv8K
+2N2FrpNk/Yu0ZUlZpRdxjZCbBGfb3QRYtc27kMSKTC3ACQfavDNE+z7YzLZFXF2L5+IsIQb5fMb4zFlQD8WT986HhIDpbxA0vS3PssmBasObTxqYivPqFf59
+G0qYLXz+/PbDyLLhy2aCvRfDXmfuGehnvSB8lw1NaFDCs7tkSRTmdB9sd5NYE6UZ0JNTlVcjZVgnWuYv7YsQpKP49NoUpRQx314h+n31up5KkGQg1XAplJs1
+pNZXCYL9pFxTrAhMNj6drvasE8QhOp1u2e7FxtyYV8jrczy0c3GtE7Kt9NQaIfhbntLdg1FUqAV6Aiq3Aa4ZaCJqIYIA9omaay/A8I05e8zQ0iL2QpB6T4am
++W8HE8kYDMmoGQU0p6EH1vlfI3nqlduzAAA=
+EOF
+          base64 -d /tmp/prune-engine.cpp.gz.b64 | gzip -d > engine.cpp
+          test -s engine.cpp
+          ! grep -q 'Prune-CET-Diagnostic' engine.cpp
+          grep -q 'BestMoveFinder' engine.cpp
+          grep -q 'int main' engine.cpp
+          echo 'Restored real Prune engine.cpp:'
+          wc -c engine.cpp
+
+          # Do not allow the A/B diagnostic source to participate in the build.
+          rm -f uci_probe.cpp uci_probe.o
+
       - name: Build host network converter
         working-directory: core
         shell: bash
@@ -71,9 +183,6 @@ jobs:
             -o permute \
             permute.cpp
 
-      # ------------------------------------------------------------
-      # Download and convert the exact network specified by Prune.
-      # ------------------------------------------------------------
       - name: Prepare embedded NNUE network
         working-directory: core
         shell: bash
@@ -91,19 +200,10 @@ jobs:
             "https://github.com/tgirolami09/Prune-nets/releases/download/${RELEASE_TAG}/${NETNAME}.bin"
 
           test -s "${NETNAME}.bin"
-
           ./permute "${NETNAME}.bin" model.bin
           test -s model.bin
-
           ls -lh "${NETNAME}.bin" model.bin
 
-      # ------------------------------------------------------------
-      # Build the REAL Prune engine.
-      #
-      # The source is the original Prune engine. The only platform-level
-      # change here is the Android runtime/linker configuration proven by
-      # the A/B CET test.
-      # ------------------------------------------------------------
       - name: Build real Prune ARM64 NEON
         working-directory: core
         shell: bash
@@ -111,11 +211,6 @@ jobs:
           set -euxo pipefail
 
           make clean || true
-
-          # The earlier A/B diagnostic probe is intentionally not part of
-          # the real Prune build. Prune's Makefile automatically compiles
-          # every .cpp in core/, so leaving uci_probe.cpp here creates a
-          # second main() and causes a duplicate-symbol linker failure.
           rm -f uci_probe.cpp uci_probe.o
 
           make -j2 prune \
@@ -132,29 +227,20 @@ jobs:
           test -x prune-android-arm64-neon
           ls -lh prune-android-arm64-neon
 
-      # ------------------------------------------------------------
-      # ELF checks before uploading.
-      # ------------------------------------------------------------
       - name: Inspect real Prune ELF
         working-directory: core
         shell: bash
         run: |
           set -euxo pipefail
-
           file prune-android-arm64-neon
-
           echo '===== ELF HEADER ====='
           readelf -h prune-android-arm64-neon
-
           echo '===== PROGRAM HEADERS ====='
           readelf -l prune-android-arm64-neon
-
           echo '===== DYNAMIC SECTION ====='
           readelf -d prune-android-arm64-neon || true
-
           echo '===== NEEDED / RPATH / RUNPATH ====='
           readelf -d prune-android-arm64-neon | grep -E 'NEEDED|RPATH|RUNPATH' || true
-
           echo '===== FILE SIZE ====='
           stat -c '%n %s bytes' prune-android-arm64-neon
 
