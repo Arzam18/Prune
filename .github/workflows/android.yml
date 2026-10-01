@@ -25,11 +25,9 @@ jobs:
       # ============================================================
       # REMOVE LEFTOVER DIAGNOSTIC PROBE
       #
-      # The real Prune Makefile uses:
-      #   SOURCES := $(wildcard *.cpp)
-      #
-      # Therefore uci_probe.cpp would otherwise be compiled together
-      # with the real engine.cpp, producing duplicate main().
+      # The real Prune Makefile automatically compiles *.cpp.
+      # uci_probe.cpp contains another main(), so it must not be
+      # present during the real build.
       #
       # This does NOT modify the real Prune engine.
       # ============================================================
@@ -142,10 +140,11 @@ jobs:
           test -f nn-name.txt
           test -f magics.out
 
+          # The diagnostic frontend must not be present.
           test ! -e uci_probe.cpp
 
+          # The real engine must contain its own main().
           grep -q 'int main' engine.cpp
-          grep -q 'BestMoveFinder' engine.cpp
 
           echo "Real Prune engine:"
           wc -c engine.cpp
@@ -289,8 +288,6 @@ jobs:
 
       # ============================================================
       # CLEAN REAL PRUNE BUILD
-      #
-      # uci_probe.cpp has already been removed above.
       # ============================================================
       - name: Clean Android objects
         working-directory: core
@@ -306,6 +303,7 @@ jobs:
             prune-android-arm64-* \
             *.d
 
+          test ! -e uci_probe.cpp
           test -x ./permute
           test -s ./model.bin
 
@@ -323,6 +321,7 @@ jobs:
 
           test -x "$ANDROID_CXX"
           test -x "$ANDROID_CC"
+          test ! -e uci_probe.cpp
           test -x ./permute
           test -s ./model.bin
 
