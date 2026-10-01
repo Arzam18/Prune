@@ -2,216 +2,330 @@ name: Build Prune for Android ARM64 NEON
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - 'core/**'
+      - 'Fathom/**'
+      - '.github/workflows/android.yml'
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  build-android:
     runs-on: ubuntu-24.04
 
     steps:
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ============================================================
-      # JAVA
-      # ============================================================
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+      - name: Install host tools
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            curl \
+            file \
+            binutils \
+            python3
+      # ------------------------------------------------------------
+      # Android NDK
+      # ------------------------------------------------------------
 
-      # ============================================================
-      # ANDROID SDK
-      # ============================================================
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          packages: 'platform-tools'
-
-      # ============================================================
-      # ANDROID NDK
-      # ============================================================
-      - name: Install Android NDK
+      - name: Install Android NDK 27.2.12479018
         shell: bash
         run: |
-          set -euo pipefail
-
-          yes | sdkmanager --licenses >/dev/null || true
-
-          sdkmanager "ndk;27.2.12479018"
-
-      # ============================================================
-      # ANDROID TOOLCHAIN
-      # ============================================================
-      - name: Set Android toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          NDK="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
-          LLVM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
-          test -x "$LLVM/aarch64-linux-android24-clang++"
-          test -x "$LLVM/aarch64-linux-android24-clang"
-          test -x "$LLVM/llvm-readelf"
-
-          echo "NDK=$NDK" >> "$GITHUB_ENV"
-          echo "LLVM=$LLVM" >> "$GITHUB_ENV"
-          echo "$LLVM" >> "$GITHUB_PATH"
-
-          echo "Android compiler:"
-          "$LLVM/aarch64-linux-android24-clang++" --version
-
-          echo "LLVM readelf:"
-          "$LLVM/llvm-readelf" --version
-
-      # ============================================================
-      # REMOVE DIAGNOSTIC BUILD FILES
-      # ============================================================
-      - name: Remove diagnostic files
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -f core/uci_probe.cpp
-          rm -f core/uci_probe.o
-          rm -f core/uci_probe.d
-
-          rm -f core/engine.o
-          rm -f core/engine.d
-
-      # ============================================================
-      # VERIFY REAL PRUNE SOURCE
-      # ============================================================
-      - name: Verify REAL Prune source
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f core/engine.cpp
-          test -f core/Makefile
-          test -f core/permute.cpp
-          test -f core/nn-name.txt
-
-          grep -q 'BestMoveFinder' core/engine.cpp
-          grep -q 'int main' core/engine.cpp
-
-          if grep -q 'Prune-CET-Diagnostic' core/engine.cpp; then
-            echo 'ERROR: diagnostic engine.cpp detected'
+          set -euxo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          export ANDROID_HOME="$SDK_ROOT"
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
+          echo "SDK_ROOT=$SDK_ROOT"
+          SDKMANAGER="$(
+            find "$SDK_ROOT/cmdline-tools" \
+              -type f \
+              -name sdkmanager \
+              -print \
+              -quit 2>/dev/null || true
+          )"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found."
+            find "$SDK_ROOT" \
+              -maxdepth 6 \
+              -type f \
+              -name sdkmanager \
+              -print || true
             exit 1
           fi
+          echo "Using sdkmanager:"
+          echo "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install \
+            "platform-tools" \
+            "platforms;android-24" \
+            "ndk;27.2.12479018"
+          NDK="$SDK_ROOT/ndk/27.2.12479018"
+          ANDROID_CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+          ANDROID_CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          test -x "$ANDROID_CXX"
+          test -x "$ANDROID_CC"
+          echo "SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          "$ANDROID_CXX" --version
+      # ------------------------------------------------------------
+      # Source checks
+      # ------------------------------------------------------------
 
-          echo "Using repository Prune engine.cpp:"
-          wc -c core/engine.cpp
-
-          echo "BestMoveFinder:"
-          grep -n 'BestMoveFinder bestMoveFinder' core/engine.cpp | head -1 || true
-
-          echo "main:"
-          grep -n 'int main' core/engine.cpp | tail -1
-
-      # ============================================================
-      # DOWNLOAD AND PREPARE NNUE
-      # ============================================================
-      - name: Download and prepare NNUE
+      - name: Verify Prune source layout
+        working-directory: core
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
+          test -f Makefile
+          test -f permute.cpp
+          test -f simd_definitions.hpp
+          test -f simd_definitions.cpp
+          test -f embeder.hpp
+          test -f embeder.cpp
+          test -f nn-name.txt
+          test -f magics.out
+      # ------------------------------------------------------------
+      # Show ARM compiler features
+      # ------------------------------------------------------------
 
-          cd core
+      - name: Show ARM64 NEON configuration
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ANDROID_CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+          "$ANDROID_CXX" \
+            -march=armv8.2-a+dotprod \
+            -dM \
+            -E \
+            -x c++ \
+            /dev/null \
+            > /tmp/arm_macros.txt
+          grep -E \
+            '__aarch64__|__ARM_NEON|__ARM_FEATURE_DOTPROD' \
+            /tmp/arm_macros.txt || true
+      # ------------------------------------------------------------
+      # HOST permuter
+      #
+      # IMPORTANT:
+      # permute is NOT an Android executable.
+      # It is a host-side network conversion utility.
+      # ------------------------------------------------------------
 
-          NETNAME="$(tail -1 nn-name.txt)"
-          RELEASE="$(head -1 nn-name.txt)"
-          URL="https://github.com/tgirolami09/Prune-nets/releases/download/$RELEASE/$NETNAME.bin"
-
-          echo "Downloading:"
-          echo "$URL"
-
-          curl -fL --retry 3 --retry-delay 2 \
-            -o "$NETNAME.bin" \
-            "$URL"
-
-          clang++ -std=gnu++17 -O3 -flto -funroll-loops \
+      - name: Build HOST permuter
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -f permute
+          clang++ \
+            -std=gnu++17 \
+            -O3 \
+            -flto \
+            -funroll-loops \
             -D_CRT_SECURE_NO_WARNINGS \
-            -o permute permute.cpp
+            -o permute \
+            permute.cpp
+          test -x ./permute
+          file ./permute
+          ./permute 2>/dev/null || true
+      # ------------------------------------------------------------
+      # Download network
+      # ------------------------------------------------------------
 
-          ./permute "$NETNAME.bin" model.bin
+      - name: Download Prune network
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
+          RELEASE_TAG="$(head -n 1 nn-name.txt | tr -d '\r\n')"
+          NETNAME="$(tail -n 1 nn-name.txt | tr -d '\r\n')"
+          test -n "$RELEASE_TAG"
+          test -n "$NETNAME"
+          URL="https://github.com/tgirolami09/Prune-nets/releases/download/${RELEASE_TAG}/${NETNAME}.bin"
+          echo "Network release: $RELEASE_TAG"
+          echo "Network file:    $NETNAME.bin"
+          echo "URL:              $URL"
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --retry-delay 2 \
+            -o "${NETNAME}.bin" \
+            "$URL"
+          test -s "${NETNAME}.bin"
+          ls -lh "${NETNAME}.bin"
+      # ------------------------------------------------------------
+      # Generate model.bin using HOST permuter
+      # ------------------------------------------------------------
 
+      - name: Generate embedded model
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
+          NETNAME="$(tail -n 1 nn-name.txt | tr -d '\r\n')"
+          test -x ./permute
+          test -s "${NETNAME}.bin"
+          ./permute \
+            "${NETNAME}.bin" \
+            model.bin
           test -s model.bin
+          echo "Generated model:"
+          ls -lh model.bin
+      # ------------------------------------------------------------
+      # ARM NEON compiler smoke test
+      # ------------------------------------------------------------
 
-          echo "model.bin:"
-          stat -c '%s bytes' model.bin
-
-      # ============================================================
-      # BUILD REAL PRUNE
-      # ============================================================
-      - name: Build REAL Prune Android ARM64 NEON
+      - name: Compile ARM64 NEON smoke test
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
+          cat > /tmp/neon_smoke.cpp <<'CPP'
+          #include <arm_neon.h>
+          #include <cstdint>
+          int main() {
+              const uint8x8_t a = {
+                  1, 2, 3, 4,
+                  5, 6, 7, 8
+              };
+              const uint8x8_t b = vadd_u8(a, a);
+              return vget_lane_u8(b, 0) == 2 ? 0 : 1;
+          }
+          CPP
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++" \
+            -std=gnu++17 \
+            -march=armv8.2-a+dotprod \
+            -c \
+            /tmp/neon_smoke.cpp \
+            -o /tmp/neon_smoke.o
+          file /tmp/neon_smoke.o
+      # ------------------------------------------------------------
+      # Clean Android objects
+      #
+      # IMPORTANT:
+      # Do NOT delete permute or model.bin.
+      # ------------------------------------------------------------
 
-          cd core
-
+      - name: Clean Android build objects
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
           make clean || true
+          rm -f \
+            prune-android-arm64 \
+            prune-android-arm64-* \
+            *.d
+          test -x ./permute
+          test -s ./model.bin
+      # ------------------------------------------------------------
+      # Build Android ARM64
+      # ------------------------------------------------------------
 
-          rm -f prune
-
-          echo "Compiler:"
-          "$LLVM/aarch64-linux-android24-clang++" --version
-
-          echo "Building ARM64-v8.2a + dotprod..."
-
-          make -f Makefile prune \
-            CXX="$LLVM/aarch64-linux-android24-clang++" \
-            CC="$LLVM/aarch64-linux-android24-clang" \
-            MAIN=engine.cpp \
-            ARCH=armv8.2-a+dotprod \
+      - name: Build Prune Android ARM64 NEON
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ANDROID_CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+          ANDROID_CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          test -x "$ANDROID_CXX"
+          test -x "$ANDROID_CC"
+          test -x ./permute
+          test -s ./model.bin
+          # The Makefile must NEVER rebuild the host permuter
+          # with the Android cross compiler.
+          touch ./permute
+          make -j2 prune \
+            CXX="$ANDROID_CXX" \
+            CC="$ANDROID_CC" \
             ANDROID=true \
-            OPT='-O3 -flto -funroll-loops -fuse-ld=lld' \
-            LDFLAGS='-static-libstdc++ -Wl,-Bstatic -lc++ -lc++abi -Wl,-Bdynamic -pthread -fuse-ld=lld -Wl,-z,max-page-size=16384'
+            ARCH="armv8.2-a+dotprod" \
+            CPUSET="unknow" \
+            ADDOPTION="-D__ARM_NEON__ -flax-vector-conversions" \
+            OPT="-O3 -flto -funroll-loops" \
+            LDFLAGS="-static-libstdc++ -Wl,-z,max-page-size=16384" \
+            EXE="prune-android-arm64"
+          test -x ./prune-android-arm64
+      # ------------------------------------------------------------
+      # Verify ELF
+      # ------------------------------------------------------------
 
-          test -x prune
-
-          cp prune ../prune-android-arm64-neon
-
-      # ============================================================
-      # ELF INSPECTION
-      # ============================================================
-      - name: Inspect ELF
+      - name: Verify Android binary
+        working-directory: core
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
+          file prune-android-arm64
+          readelf -h prune-android-arm64
+          readelf -h prune-android-arm64 \
+            | grep -q 'Machine:.*AArch64'
+          readelf -h prune-android-arm64 \
+            | grep -q 'Class:.*ELF64'
+          readelf -l prune-android-arm64 \
+            | grep -q 'GNU_STACK'
+          echo "Android ARM64 ELF verification passed."
+      # ------------------------------------------------------------
+      # Inspect generated ARM64 instructions
+      # ------------------------------------------------------------
 
-          file prune-android-arm64-neon
-
-          "$LLVM/llvm-readelf" -h prune-android-arm64-neon
-          "$LLVM/llvm-readelf" -l prune-android-arm64-neon
-
-          "$LLVM/llvm-readelf" -d prune-android-arm64-neon || true
-
-      # ============================================================
-      # UCI SMOKE TEST
-      # ============================================================
-      - name: UCI smoke test
+      - name: Check ARM NEON instructions
+        working-directory: core
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objdump" \
+            -d \
+            prune-android-arm64 \
+            > /tmp/prune.disasm
+          echo "NEON/DOTPROD instruction samples:"
+          grep -E \
+            '\b(addv|saddlv|sdot|usdot|smull|sqdmulh|sqxtn|uqxtn|smin|smax|umin|umax)\b' \
+            /tmp/prune.disasm \
+            | head -30 || true
+      # ------------------------------------------------------------
+      # Network / binary checks
+      # ------------------------------------------------------------
 
-          printf 'uci\nisready\nposition startpos\ngo depth 2\nquit\n' \
-            | ./prune-android-arm64-neon || true
+      - name: Verify embedded network
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -s model.bin
+          test -s magics.out
+          test -s prune-android-arm64
+          echo "Network:"
+          ls -lh model.bin
+          echo "Engine:"
+          ls -lh prune-android-arm64
+          sha256sum prune-android-arm64
+      # ------------------------------------------------------------
+      # Single binary artifact
+      # ------------------------------------------------------------
 
-      # ============================================================
-      # UPLOAD
-      # ============================================================
-      - name: Upload real Prune binary
+      - name: Prepare single binary artifact
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p ../artifact
+          cp \
+            prune-android-arm64 \
+            ../artifact/prune-android-arm64
+          chmod +x ../artifact/prune-android-arm64
+          ls -lh ../artifact/prune-android-arm64
+      - name: Upload single binary
         uses: actions/upload-artifact@v4
         with:
-          name: prune-android-arm64-neon
-          path: prune-android-arm64-neon
+          name: prune-android-arm64
+          path: artifact/prune-android-arm64
           if-no-files-found: error
+          compression-level: 0
