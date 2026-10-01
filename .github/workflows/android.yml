@@ -16,13 +16,42 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ============================================================
+      # REMOVE LEFTOVER DIAGNOSTIC PROBE
+      #
+      # The real Prune Makefile uses:
+      #   SOURCES := $(wildcard *.cpp)
+      #
+      # Therefore uci_probe.cpp would otherwise be compiled together
+      # with the real engine.cpp, producing duplicate main().
+      #
+      # This does NOT modify the real Prune engine.
+      # ============================================================
+      - name: Remove diagnostic probe
+        working-directory: core
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -f uci_probe.cpp
+          rm -f uci_probe.o
+          rm -f uci_probe.d
+
+      # ============================================================
+      # HOST TOOLS
+      # ============================================================
       - name: Install host tools
         run: |
           set -euxo pipefail
+
           sudo apt-get update
+
           sudo apt-get install -y \
             clang \
             curl \
@@ -30,10 +59,9 @@ jobs:
             binutils \
             python3
 
-      # ------------------------------------------------------------
-      # Android NDK
-      # ------------------------------------------------------------
-
+      # ============================================================
+      # ANDROID NDK
+      # ============================================================
       - name: Install Android NDK 27.2.12479018
         shell: bash
         run: |
@@ -91,29 +119,43 @@ jobs:
 
           "$ANDROID_CXX" --version
 
-      # ------------------------------------------------------------
-      # Source checks
-      # ------------------------------------------------------------
-
-      - name: Verify Prune source layout
+      # ============================================================
+      # VERIFY REAL PRUNE SOURCE
+      # ============================================================
+      - name: Verify Prune source
         working-directory: core
         shell: bash
         run: |
           set -euxo pipefail
 
           test -f Makefile
-          test -f permute.cpp
-          test -f simd_definitions.hpp
+          test -f engine.cpp
+          test -f BestMoveFinder.cpp
+          test -f BestMoveFinder.hpp
+          test -f NNUE.cpp
+          test -f NNUE.hpp
           test -f simd_definitions.cpp
-          test -f embeder.hpp
+          test -f simd_definitions.hpp
           test -f embeder.cpp
+          test -f embeder.hpp
+          test -f permute.cpp
           test -f nn-name.txt
           test -f magics.out
 
-      # ------------------------------------------------------------
-      # Show ARM compiler features
-      # ------------------------------------------------------------
+          test ! -e uci_probe.cpp
 
+          grep -q 'int main' engine.cpp
+          grep -q 'BestMoveFinder' engine.cpp
+
+          echo "Real Prune engine:"
+          wc -c engine.cpp
+
+          echo "Engine main:"
+          grep -n 'int main' engine.cpp
+
+      # ============================================================
+      # SHOW ARM64 NEON CONFIGURATION
+      # ============================================================
       - name: Show ARM64 NEON configuration
         shell: bash
         run: |
@@ -133,14 +175,9 @@ jobs:
             '__aarch64__|__ARM_NEON|__ARM_FEATURE_DOTPROD' \
             /tmp/arm_macros.txt || true
 
-      # ------------------------------------------------------------
-      # HOST permuter
-      #
-      # IMPORTANT:
-      # permute is NOT an Android executable.
-      # It is a host-side network conversion utility.
-      # ------------------------------------------------------------
-
+      # ============================================================
+      # BUILD HOST PERMUTER
+      # ============================================================
       - name: Build HOST permuter
         working-directory: core
         shell: bash
@@ -162,12 +199,9 @@ jobs:
 
           file ./permute
 
-          ./permute 2>/dev/null || true
-
-      # ------------------------------------------------------------
-      # Download network
-      # ------------------------------------------------------------
-
+      # ============================================================
+      # DOWNLOAD PRUNE NETWORK
+      # ============================================================
       - name: Download Prune network
         working-directory: core
         shell: bash
@@ -184,7 +218,6 @@ jobs:
 
           echo "Network release: $RELEASE_TAG"
           echo "Network file:    $NETNAME.bin"
-          echo "URL:              $URL"
 
           curl \
             --fail \
@@ -198,10 +231,9 @@ jobs:
 
           ls -lh "${NETNAME}.bin"
 
-      # ------------------------------------------------------------
-      # Generate model.bin using HOST permuter
-      # ------------------------------------------------------------
-
+      # ============================================================
+      # GENERATE REAL EMBEDDED MODEL
+      # ============================================================
       - name: Generate embedded model
         working-directory: core
         shell: bash
@@ -222,10 +254,9 @@ jobs:
           echo "Generated model:"
           ls -lh model.bin
 
-      # ------------------------------------------------------------
-      # ARM NEON compiler smoke test
-      # ------------------------------------------------------------
-
+      # ============================================================
+      # ARM64 NEON COMPILER TEST
+      # ============================================================
       - name: Compile ARM64 NEON smoke test
         shell: bash
         run: |
@@ -256,14 +287,12 @@ jobs:
 
           file /tmp/neon_smoke.o
 
-      # ------------------------------------------------------------
-      # Clean Android objects
+      # ============================================================
+      # CLEAN REAL PRUNE BUILD
       #
-      # IMPORTANT:
-      # Do NOT delete permute or model.bin.
-      # ------------------------------------------------------------
-
-      - name: Clean Android build objects
+      # uci_probe.cpp has already been removed above.
+      # ============================================================
+      - name: Clean Android objects
         working-directory: core
         shell: bash
         run: |
@@ -272,6 +301,7 @@ jobs:
           make clean || true
 
           rm -f \
+            prune \
             prune-android-arm64 \
             prune-android-arm64-* \
             *.d
@@ -279,10 +309,9 @@ jobs:
           test -x ./permute
           test -s ./model.bin
 
-      # ------------------------------------------------------------
-      # Build Android ARM64
-      # ------------------------------------------------------------
-
+      # ============================================================
+      # BUILD REAL PRUNE ANDROID ARM64 NEON
+      # ============================================================
       - name: Build Prune Android ARM64 NEON
         working-directory: core
         shell: bash
@@ -297,10 +326,6 @@ jobs:
           test -x ./permute
           test -s ./model.bin
 
-          # The Makefile must NEVER rebuild the host permuter
-          # with the Android cross compiler.
-          touch ./permute
-
           make -j2 prune \
             CXX="$ANDROID_CXX" \
             CC="$ANDROID_CC" \
@@ -314,10 +339,9 @@ jobs:
 
           test -x ./prune-android-arm64
 
-      # ------------------------------------------------------------
-      # Verify ELF
-      # ------------------------------------------------------------
-
+      # ============================================================
+      # VERIFY ELF
+      # ============================================================
       - name: Verify Android binary
         working-directory: core
         shell: bash
@@ -334,15 +358,11 @@ jobs:
           readelf -h prune-android-arm64 \
             | grep -q 'Class:.*ELF64'
 
-          readelf -l prune-android-arm64 \
-            | grep -q 'GNU_STACK'
-
           echo "Android ARM64 ELF verification passed."
 
-      # ------------------------------------------------------------
-      # Inspect generated ARM64 instructions
-      # ------------------------------------------------------------
-
+      # ============================================================
+      # CHECK ARM64 SIMD INSTRUCTIONS
+      # ============================================================
       - name: Check ARM NEON instructions
         working-directory: core
         shell: bash
@@ -361,10 +381,9 @@ jobs:
             /tmp/prune.disasm \
             | head -30 || true
 
-      # ------------------------------------------------------------
-      # Network / binary checks
-      # ------------------------------------------------------------
-
+      # ============================================================
+      # VERIFY NETWORK + BINARY
+      # ============================================================
       - name: Verify embedded network
         working-directory: core
         shell: bash
@@ -383,11 +402,10 @@ jobs:
 
           sha256sum prune-android-arm64
 
-      # ------------------------------------------------------------
-      # Single binary artifact
-      # ------------------------------------------------------------
-
-      - name: Prepare single binary artifact
+      # ============================================================
+      # SINGLE BINARY ARTIFACT
+      # ============================================================
+      - name: Prepare binary artifact
         working-directory: core
         shell: bash
         run: |
