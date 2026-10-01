@@ -89,8 +89,105 @@ public:
 int moveOverhead = 100;
 const int alloted_space=64*hashMul;
 Perft doPerft;
-BestMoveFinder bestMoveFinder(alloted_space);
+BestMoveFinder* bestMoveFinder = nullptr;
+
+const int sizeQ=128;
+string inpQueue[sizeQ];
+
+atomic<int> startQ = 0;
+atomic<int> endQ = 0;
 atomic<bool> stop_all=false;
+
+bool exec_command;
+
+mutex mtx_command;
+condition_variable cv_command;
+condition_variable cv_new_command;
+mutex mtx_new_command;
+
+void printUCIInfo();
+
+void manageInput(){
+    while(!stop_all){
+        string com;
+
+        if(!getline(cin, com)){
+            bestMoveFinder->running=false;
+            stop_all=true;
+            cv_new_command.notify_one();
+            break;
+        }
+
+        while(!com.empty() &&
+              (com.back()=='\r' ||
+               com.back()=='\n' ||
+               com.back()==' ' ||
+               com.back()=='\t'))
+            com.pop_back();
+
+        size_t first=com.find_first_not_of(" \t");
+
+        if(first!=string::npos && first>0)
+            com.erase(0, first);
+
+        if(com.empty())
+            continue;
+
+        // Answer the initial UCI handshake immediately.
+        if(com=="uci"){
+            printUCIInfo();
+            continue;
+        }
+
+        if(com=="stop"){
+            bestMoveFinder->running=false;
+            continue;
+        }
+
+        if(com=="isready"){
+            {
+                unique_lock<mutex> lock(mtx_command);
+
+                cv_command.wait(lock, [&]{
+                    return !exec_command ||
+                           bestMoveFinder->running ||
+                           stop_all;
+                });
+            }
+
+            if(!stop_all)
+                printf("readyok\n");
+
+            fflush(stdout);
+            continue;
+        }
+
+        if(com=="quit"){
+            bestMoveFinder->running=false;
+            stop_all=true;
+            cv_new_command.notify_one();
+            continue;
+        }
+
+        {
+            unique_lock<mutex> lock(mtx_new_command);
+
+            cv_new_command.wait(lock, []{
+                return stop_all ||
+                       (endQ-startQ)<sizeQ;
+            });
+
+            if(stop_all)
+                break;
+
+            inpQueue[endQ%sizeQ]=com;
+            endQ++;
+        }
+
+        cv_new_command.notify_one();
+        fflush(stdout);
+    }
+}
 
 const set<string> keywords = {
     "fen",
@@ -311,7 +408,7 @@ bestMoveResponse goCommand(
                 color
             );
 
-            return bestMoveFinder.bestMove<0>(
+            return bestMoveFinder->bestMove<0>(
                 state.root,
                 tm,
                 state.movesFromRoot
@@ -320,7 +417,7 @@ bestMoveResponse goCommand(
         }else if(args[0].first=="movetime"){
             int movetime=stoi(args[0].second);
 
-            return bestMoveFinder.bestMove<0>(
+            return bestMoveFinder->bestMove<0>(
                 state.root,
                 TM(movetime,movetime),
                 state.movesFromRoot,
@@ -330,7 +427,7 @@ bestMoveResponse goCommand(
         }else if(args[0].first=="nodes"){
             int nodes=stoi(args[0].second);
 
-            return bestMoveFinder.bestMove<1>(
+            return bestMoveFinder->bestMove<1>(
                 state.root,
                 TM(nodes,nodes),
                 state.movesFromRoot,
@@ -340,7 +437,7 @@ bestMoveResponse goCommand(
         }else if(args[0].first=="depth"){
             int depth=stoi(args[0].second);
 
-            return bestMoveFinder.bestMove<2>(
+            return bestMoveFinder->bestMove<2>(
                 state.root,
                 TM(depth,depth),
                 state.movesFromRoot,
@@ -349,7 +446,7 @@ bestMoveResponse goCommand(
         }
     }
 
-    return bestMoveFinder.bestMove<2>(
+    return bestMoveFinder->bestMove<2>(
         state.root,
         TM(200,200),
         state.movesFromRoot,
@@ -365,454 +462,441 @@ void manageSearch(){
     );
 
     Move lastMove=nullMove;
+
     auto ieval=make_unique<IncrementalEvaluator>();
 
-    // Spaghet-style UCI architecture: one owner for stdin/stdout and a
-    // background search thread. No command queue or input thread is needed.
-    thread searchThread;
-
-    auto waitForSearch=[&](){
-        if(searchThread.joinable())
-            searchThread.join();
-    };
-
     while(!stop_all){
-        string com;
 
-        if(!getline(cin,com)){
-            bestMoveFinder.running=false;
-            stop_all=true;
-            break;
-        }
+        if(startQ!=endQ){
 
-        while(!com.empty() &&
-              (com.back()=='\r' || com.back()=='\n' ||
-               com.back()==' ' || com.back()=='\t'))
-            com.pop_back();
-
-        size_t first=com.find_first_not_of(" \t");
-        if(first!=string::npos && first>0)
-            com.erase(0,first);
-
-        if(com.empty())
-            continue;
-
-        if(com=="uci"){
-            printUCIInfo();
-            continue;
-        }
-
-        if(com=="isready"){
-            printf("readyok\n");
-            fflush(stdout);
-            continue;
-        }
-
-        if(com=="stop"){
-            bestMoveFinder.running=false;
-            waitForSearch();
-            continue;
-        }
-
-        if(com=="quit"){
-            bestMoveFinder.running=false;
-            waitForSearch();
-            stop_all=true;
-            break;
-        }
-
-        istringstream stream(com);
-
-        string command;
-        stream>>command;
-
-        vector<pair<string,string>> parsed;
-        string token;
-
-        /*
-         * Standard UCI "go" parser.
-         *
-         * Unknown go parameters are ignored instead of being interpreted
-         * as part of another parameter.
-         */
-        if(command=="go"){
-
-            while(stream>>token){
-
-                if(
-                    token=="wtime" ||
-                    token=="btime" ||
-                    token=="winc" ||
-                    token=="binc" ||
-                    token=="movetime" ||
-                    token=="nodes" ||
-                    token=="depth" ||
-                    token=="mate"
-                ){
-                    string value;
-
-                    if(stream>>value)
-                        parsed.push_back({
-                            token,
-                            value
-                        });
-
-                }else if(token=="searchmoves"){
-
-                    string moves;
-                    string next;
-
-                    while(stream>>next){
-                        if(!moves.empty())
-                            moves+=' ';
-
-                        moves+=next;
-                    }
-
-                    parsed.push_back({
-                        "searchmoves",
-                        moves
-                    });
-
-                }else if(
-                    token=="infinite" ||
-                    token=="ponder"
-                ){
-                    parsed.push_back({
-                        token,
-                        ""
-                    });
-                }
+            {
+                lock_guard<mutex> lock(mtx_command);
+                exec_command=true;
             }
 
-        /*
-         * UCI setoption parser.
-         *
-         * Both option names and values may contain spaces.
-         */
-        }else if(command=="setoption"){
+            cv_command.notify_one();
 
-            vector<string> parts;
+            string com=inpQueue[startQ%sizeQ];
+            startQ++;
 
-            while(stream>>token)
-                parts.push_back(token);
+            istringstream stream(com);
 
-            size_t namePos=parts.size();
-            size_t valuePos=parts.size();
+            string command;
+            stream>>command;
 
-            for(size_t i=0;i<parts.size();++i){
-
-                if(
-                    parts[i]=="name" &&
-                    namePos==parts.size()
-                )
-                    namePos=i;
-
-                else if(
-                    parts[i]=="value" &&
-                    valuePos==parts.size()
-                )
-                    valuePos=i;
-            }
-
-            if(namePos<parts.size()){
-
-                size_t nameEnd=
-                    (
-                        valuePos<parts.size() &&
-                        valuePos>namePos
-                    )
-                    ? valuePos
-                    : parts.size();
-
-                string name;
-                string value;
-
-                for(
-                    size_t i=namePos+1;
-                    i<nameEnd;
-                    ++i
-                ){
-                    if(!name.empty())
-                        name+=' ';
-
-                    name+=parts[i];
-                }
-
-                for(
-                    size_t i=
-                        valuePos<parts.size()
-                        ? valuePos+1
-                        : parts.size();
-                    i<parts.size();
-                    ++i
-                ){
-                    if(!value.empty())
-                        value+=' ';
-
-                    value+=parts[i];
-                }
-
-                parsed.push_back({
-                    "name",
-                    name
-                });
-
-                parsed.push_back({
-                    "value",
-                    value
-                });
-            }
-
-        /*
-         * Standard UCI position parser.
-         */
-        }else if(command=="position"){
-
-            vector<string> parts;
-
-            while(stream>>token)
-                parts.push_back(token);
-
-            if(
-                !parts.empty() &&
-                parts[0]=="startpos"
-            ){
-                parsed.push_back({
-                    "startpos",
-                    ""
-                });
-
-                size_t mp=parts.size();
-
-                for(
-                    size_t i=1;
-                    i<parts.size();
-                    ++i
-                ){
-                    if(parts[i]=="moves"){
-                        mp=i;
-                        break;
-                    }
-                }
-
-                if(mp<parts.size()){
-
-                    string moves;
-
-                    for(
-                        size_t i=mp+1;
-                        i<parts.size();
-                        ++i
-                    ){
-                        if(!moves.empty())
-                            moves+=' ';
-
-                        moves+=parts[i];
-                    }
-
-                    parsed.push_back({
-                        "moves",
-                        moves
-                    });
-                }
-
-            }else if(
-                !parts.empty() &&
-                parts[0]=="fen"
-            ){
-
-                size_t mp=parts.size();
-
-                for(
-                    size_t i=1;
-                    i<parts.size();
-                    ++i
-                ){
-                    if(parts[i]=="moves"){
-                        mp=i;
-                        break;
-                    }
-                }
-
-                string fen;
-
-                for(
-                    size_t i=1;
-                    i<mp;
-                    ++i
-                ){
-                    if(!fen.empty())
-                        fen+=' ';
-
-                    fen+=parts[i];
-                }
-
-                parsed.push_back({
-                    "fen",
-                    fen
-                });
-
-                if(mp<parts.size()){
-
-                    string moves;
-
-                    for(
-                        size_t i=mp+1;
-                        i<parts.size();
-                        ++i
-                    ){
-                        if(!moves.empty())
-                            moves+=' ';
-
-                        moves+=parts[i];
-                    }
-
-                    parsed.push_back({
-                        "moves",
-                        moves
-                    });
-                }
-            }
-
-        }else{
+            vector<pair<string,string>> parsed;
+            string token;
 
             /*
-             * Preserve the original parser for Prune's private/debug
-             * commands such as bench, eval, runSEE, etc.
+             * Standard UCI "go" parser.
+             *
+             * Unknown go parameters are ignored instead of being interpreted
+             * as part of another parameter.
              */
-            string word;
-            string keyword="";
-            string value="";
+            if(command=="go"){
 
-            while(stream>>word){
+                while(stream>>token){
 
-                if(keywords.count(word)){
+                    if(
+                        token=="wtime" ||
+                        token=="btime" ||
+                        token=="winc" ||
+                        token=="binc" ||
+                        token=="movetime" ||
+                        token=="nodes" ||
+                        token=="depth" ||
+                        token=="mate"
+                    ){
+                        string value;
 
-                    if(value.empty()){
-
-                        if(!keyword.empty())
+                        if(stream>>value)
                             parsed.push_back({
-                                keyword,
-                                ""
+                                token,
+                                value
                             });
 
-                    }else{
+                    }else if(token=="searchmoves"){
 
-                        value.pop_back();
+                        string moves;
+                        string next;
+
+                        while(stream>>next){
+                            if(!moves.empty())
+                                moves+=' ';
+
+                            moves+=next;
+                        }
 
                         parsed.push_back({
-                            keyword,
-                            value
+                            "searchmoves",
+                            moves
+                        });
+
+                    }else if(
+                        token=="infinite" ||
+                        token=="ponder"
+                    ){
+                        parsed.push_back({
+                            token,
+                            ""
+                        });
+                    }
+                }
+
+            /*
+             * UCI setoption parser.
+             *
+             * Both option names and values may contain spaces.
+             */
+            }else if(command=="setoption"){
+
+                vector<string> parts;
+
+                while(stream>>token)
+                    parts.push_back(token);
+
+                size_t namePos=parts.size();
+                size_t valuePos=parts.size();
+
+                for(size_t i=0;i<parts.size();++i){
+
+                    if(
+                        parts[i]=="name" &&
+                        namePos==parts.size()
+                    )
+                        namePos=i;
+
+                    else if(
+                        parts[i]=="value" &&
+                        valuePos==parts.size()
+                    )
+                        valuePos=i;
+                }
+
+                if(namePos<parts.size()){
+
+                    size_t nameEnd=
+                        (
+                            valuePos<parts.size() &&
+                            valuePos>namePos
+                        )
+                        ? valuePos
+                        : parts.size();
+
+                    string name;
+                    string value;
+
+                    for(
+                        size_t i=namePos+1;
+                        i<nameEnd;
+                        ++i
+                    ){
+                        if(!name.empty())
+                            name+=' ';
+
+                        name+=parts[i];
+                    }
+
+                    for(
+                        size_t i=
+                            valuePos<parts.size()
+                            ? valuePos+1
+                            : parts.size();
+                        i<parts.size();
+                        ++i
+                    ){
+                        if(!value.empty())
+                            value+=' ';
+
+                        value+=parts[i];
+                    }
+
+                    parsed.push_back({
+                        "name",
+                        name
+                    });
+
+                    parsed.push_back({
+                        "value",
+                        value
+                    });
+                }
+
+            /*
+             * Standard UCI position parser.
+             */
+            }else if(command=="position"){
+
+                vector<string> parts;
+
+                while(stream>>token)
+                    parts.push_back(token);
+
+                if(
+                    !parts.empty() &&
+                    parts[0]=="startpos"
+                ){
+                    parsed.push_back({
+                        "startpos",
+                        ""
+                    });
+
+                    size_t mp=parts.size();
+
+                    for(
+                        size_t i=1;
+                        i<parts.size();
+                        ++i
+                    ){
+                        if(parts[i]=="moves"){
+                            mp=i;
+                            break;
+                        }
+                    }
+
+                    if(mp<parts.size()){
+
+                        string moves;
+
+                        for(
+                            size_t i=mp+1;
+                            i<parts.size();
+                            ++i
+                        ){
+                            if(!moves.empty())
+                                moves+=' ';
+
+                            moves+=parts[i];
+                        }
+
+                        parsed.push_back({
+                            "moves",
+                            moves
                         });
                     }
 
-                    value="";
-                    keyword=word;
+                }else if(
+                    !parts.empty() &&
+                    parts[0]=="fen"
+                ){
 
-                }else{
+                    size_t mp=parts.size();
 
-                    value+=word+" ";
-                }
-            }
-
-            if(!value.empty())
-                value.pop_back();
-
-            if(
-                !keyword.empty() ||
-                !value.empty()
-            ){
-                parsed.push_back({
-                    keyword,
-                    value
-                });
-            }
-        }
-
-                    if(command=="position" ||
-                       command=="setoption" ||
-                       command=="ucinewgame" ||
-                       command=="bench" ||
-                       command=="eval" ||
-                       command=="raweval" ||
-                       command=="runQ" ||
-                       command=="perft" ||
-                       command=="arch"){
-                        bestMoveFinder.running=false;
-                        waitForSearch();
+                    for(
+                        size_t i=1;
+                        i<parts.size();
+                        ++i
+                    ){
+                        if(parts[i]=="moves"){
+                            mp=i;
+                            break;
+                        }
                     }
 
-                    if(command=="runQ"){
+                    string fen;
 
-            bestMoveFinder.testQuiescenceSearch(
-                state->root
-            );
+                    for(
+                        size_t i=1;
+                        i<mp;
+                        ++i
+                    ){
+                        if(!fen.empty())
+                            fen+=' ';
 
-        }else if(command=="eval"){
+                        fen+=parts[i];
+                    }
 
-            PositionSnapshot snap;
-            snap.save(state->root);
+                    parsed.push_back({
+                        "fen",
+                        fen
+                    });
 
-            for(Move move:state->movesFromRoot)
-                state->root.playPartialMove(move);
+                    if(mp<parts.size()){
 
-            ieval->init(state->root);
+                        string moves;
 
-            int overall_eval=
-                ieval->getRaw(
-                    state->root.friendlyColor()
-                );
+                        for(
+                            size_t i=mp+1;
+                            i<parts.size();
+                            ++i
+                        ){
+                            if(!moves.empty())
+                                moves+=' ';
 
-            for(int r=7;r>=0;r--){
+                            moves+=parts[i];
+                        }
 
-                pair<char,int> evals[8];
+                        parsed.push_back({
+                            "moves",
+                            moves
+                        });
+                    }
+                }
 
-                for(int c=0;c<8;c++){
+            }else{
 
-                    int square=(r<<3)|c;
+                /*
+                 * Preserve the original parser for Prune's private/debug
+                 * commands such as bench, eval, runSEE, etc.
+                 */
+                string word;
+                string keyword="";
+                string value="";
 
-                    int piece=
-                        state->root.getfullPiece(square);
+                while(stream>>word){
 
-                    if(type(piece)!=SPACE){
+                    if(keywords.count(word)){
 
-                        ieval->changePiece2<-1,true>(
-                            square,
-                            type(piece),
-                            color(piece)
-                        );
+                        if(value.empty()){
 
-                        char repr=
-                            id_to_piece[type(piece)];
+                            if(!keyword.empty())
+                                parsed.push_back({
+                                    keyword,
+                                    ""
+                                });
 
-                        int derived=
-                            overall_eval-
-                            ieval->getRaw(
-                                state->root.friendlyColor()
-                            );
+                        }else{
 
-                        if(color(piece)==WHITE)
-                            repr=toupper(repr);
+                            value.pop_back();
 
-                        evals[7-c]={
-                            repr,
-                            derived
-                        };
+                            parsed.push_back({
+                                keyword,
+                                value
+                            });
+                        }
 
-                        ieval->changePiece2<1,false>(
-                            square,
-                            type(piece),
-                            color(piece)
-                        );
+                        value="";
+                        keyword=word;
 
                     }else{
 
-                        evals[7-c]={
-                            ' ',
-                            0
-                        };
+                        value+=word+" ";
                     }
+                }
+
+                if(!value.empty())
+                    value.pop_back();
+
+                if(
+                    !keyword.empty() ||
+                    !value.empty()
+                ){
+                    parsed.push_back({
+                        keyword,
+                        value
+                    });
+                }
+            }
+
+            if(command=="runQ"){
+
+                bestMoveFinder->testQuiescenceSearch(
+                    state->root
+                );
+
+            }else if(command=="eval"){
+
+                PositionSnapshot snap;
+                snap.save(state->root);
+
+                for(Move move:state->movesFromRoot)
+                    state->root.playPartialMove(move);
+
+                ieval->init(state->root);
+
+                int overall_eval=
+                    ieval->getRaw(
+                        state->root.friendlyColor()
+                    );
+
+                for(int r=7;r>=0;r--){
+
+                    pair<char,int> evals[8];
+
+                    for(int c=0;c<8;c++){
+
+                        int square=(r<<3)|c;
+
+                        int piece=
+                            state->root.getfullPiece(square);
+
+                        if(type(piece)!=SPACE){
+
+                            ieval->changePiece2<-1,true>(
+                                square,
+                                type(piece),
+                                color(piece)
+                            );
+
+                            char repr=
+                                id_to_piece[type(piece)];
+
+                            int derived=
+                                overall_eval-
+                                ieval->getRaw(
+                                    state->root.friendlyColor()
+                                );
+
+                            if(color(piece)==WHITE)
+                                repr=toupper(repr);
+
+                            evals[7-c]={
+                                repr,
+                                derived
+                            };
+
+                            ieval->changePiece2<1,false>(
+                                square,
+                                type(piece),
+                                color(piece)
+                            );
+
+                        }else{
+
+                            evals[7-c]={
+                                ' ',
+                                0
+                            };
+                        }
+                    }
+
+                    for(int i=0;i<8;i++)
+                        printf("+-------");
+
+                    printf("+\n");
+
+                    for(int i=0;i<8;i++)
+                        printf(
+                            "|   %c   ",
+                            evals[i].first
+                        );
+
+                    printf("|\n");
+
+                    for(int i=0;i<8;i++){
+
+                        if(evals[i].first==' ')
+                            printf("|       ");
+
+                        else{
+
+                            if(abs(evals[i].second)>10*100)
+
+                                printf(
+                                    "| %+2.1f ",
+                                    evals[i].second/100.0
+                                );
+
+                            else
+
+                                printf(
+                                    "| %+1.2f ",
+                                    evals[i].second/100.0
+                                );
+                        }
+                    }
+
+                    printf("|\n");
                 }
 
                 for(int i=0;i<8;i++)
@@ -820,838 +904,870 @@ void manageSearch(){
 
                 printf("+\n");
 
-                for(int i=0;i<8;i++)
-                    printf(
-                        "|   %c   ",
-                        evals[i].first
+                snap.restore(state->root);
+
+                printf(
+                    "static evaluation: %d cp\n",
+                    overall_eval
+                );
+
+            }else if(command=="raweval"){
+
+                PositionSnapshot snap;
+                snap.save(state->root);
+
+                for(Move move:state->movesFromRoot)
+                    state->root.playPartialMove(move);
+
+                ieval->init(state->root);
+
+                int overall_eval=
+                    ieval->getRaw(
+                        state->root.friendlyColor()
                     );
 
-                printf("|\n");
+                snap.restore(state->root);
 
-                for(int i=0;i<8;i++){
+                printf(
+                    "%d cp\n",
+                    overall_eval
+                );
 
-                    if(evals[i].first==' ')
-                        printf("|       ");
+            }else if(command=="ucinewgame"){
 
-                    else{
+                bestMoveFinder->clear();
+                lastMove=nullMove;
 
-                        if(abs(evals[i].second)>10*100)
+            }else if(command=="version"){
+
+#ifdef COMMIT
+                printf(
+                    "version: %s\n",
+                    COMMIT
+                );
+#else
+                printf("version: test\n");
+#endif
+
+            }else if(command=="bench"){
+
+                int sumNodes[maxDepth+1];
+                int sumNPS=0;
+                int sumTime=0;
+
+                int histDepth[maxDepth+1];
+                int sumSelDepth[maxDepth+1];
+
+                for(int i=0;i<=maxDepth;i++){
+                    sumNodes[i]=0;
+                    histDepth[i]=0;
+                    sumSelDepth[i]=0;
+                }
+
+                int maxDepthAttain=0;
+
+                vector<pair<int,int>> Scores;
+
+                if(parsed.size()==0)
+                    parsed={{"depth","10"}};
+
+                for(
+                    unsigned idFen=0;
+                    idFen<benches.size();
+                    idFen++
+                ){
+
+                    if(DEBUG){
+
+                        printf(
+                            "\rposition %d/%d",
+                            idFen,
+                            (int)benches.size()
+                        );
+
+                        fflush(stdout);
+                    }
+
+                    auto testState=
+                        make_unique<Chess>();
+
+                    testState->movesFromRoot={};
+
+                    testState->root.fromFen(
+                        benches[idFen]
+                    );
+
+                    bestMoveFinder->clear();
+
+                    bool _;
+
+                    bestMoveResponse res=
+                        goCommand(
+                            parsed,
+                            *testState,
+                            false,
+                            _
+                        );
+
+                    vector<depthInfo> infos=
+                        get<3>(res);
+
+                    if(DEBUG)
+
+                        printf(
+                            "fen: %s score: %d nodes: %" PRId64 "\n",
+                            testState->root.toFen().c_str(),
+                            get<2>(res),
+                            infos.empty()
+                                ? 0
+                                : infos.back().node
+                        );
+
+                    for(depthInfo info:infos){
+
+                        sumNodes[info.depth]+=info.node;
+                        histDepth[info.depth]++;
+                        sumSelDepth[info.depth]+=info.seldepth;
+
+                        if(info.depth==maxDepth)
+                            printf(
+                                "\n%s\n",
+                                benches[idFen].c_str()
+                            );
+
+                        maxDepthAttain=
+                            max(
+                                maxDepthAttain,
+                                info.depth
+                            );
+                    }
+
+                    if(infos.size()){
+
+                        depthInfo lastInfo=
+                            infos[infos.size()-1];
+
+                        sumNPS+=lastInfo.node;
+                        sumTime+=lastInfo.time;
+
+                        Scores.push_back({
+                            lastInfo.depth,
+                            lastInfo.node
+                        });
+                    }
+                }
+
+                if(DEBUG){
+
+                    printf(
+                        "\rposition %d/%d\n",
+                        (int)benches.size(),
+                        (int)benches.size()
+                    );
+
+                    printf("depth\t");
+
+                    for(
+                        int i=0;
+                        i<=maxDepthAttain;
+                        i++
+                    )
+                        printf("\t%d",i);
+
+                    printf("\nnodes\t");
+
+                    for(
+                        int i=0;
+                        i<=maxDepthAttain;
+                        i++
+                    ){
+
+                        if(histDepth[i])
 
                             printf(
-                                "| %+2.1f ",
-                                evals[i].second/100.0
+                                "\t%d",
+                                sumNodes[i]/histDepth[i]
+                            );
+
+                        else
+                            printf("\t0");
+                    }
+
+                    printf("\nseldepth");
+
+                    for(
+                        int i=0;
+                        i<=maxDepthAttain;
+                        i++
+                    ){
+
+                        if(histDepth[i])
+
+                            printf(
+                                "\t%d",
+                                sumSelDepth[i]/histDepth[i]
+                            );
+
+                        else
+                            printf("\t0");
+                    }
+
+                    printf(
+                        "\n%.0fnps\n",
+                        sumNPS*1000.0/sumTime
+                    );
+                }
+
+                sort(
+                    Scores.begin(),
+                    Scores.end()
+                );
+
+                int size=Scores.size();
+
+                pair<int,big> scoreThird={0.0,0.0};
+                pair<int,big> scoreAll={0.0,0.0};
+
+                for(int i=0;i<size;i++){
+
+                    pair<int,big> locScore={
+                        Scores[i].first,
+                        Scores[i].second
+                    };
+
+                    scoreAll.first+=locScore.first;
+                    scoreAll.second+=locScore.second;
+
+                    if(
+                        i>=size/3 &&
+                        i<size*2/3
+                    ){
+
+                        scoreThird.first+=
+                            locScore.first;
+
+                        scoreThird.second+=
+                            locScore.second;
+                    }
+                }
+
+                if(DEBUG)
+
+                    printf(
+                        "search score: (%d %" PRId64 ") (%d %" PRId64 ")\n",
+                        scoreThird.first,
+                        scoreThird.second,
+                        scoreAll.first,
+                        scoreAll.second
+                    );
+
+                printf(
+                    "%" PRId64 " nodes %.0f nps\n",
+                    scoreAll.second,
+                    sumNPS*1000.0/sumTime
+                );
+
+#ifdef DEBUG_MACRO
+
+                diffsStat.print(
+                    "corrhist applied"
+                );
+
+                printf(
+                    "nmp in allnodes stats : %d/%d = %.2f%%\n",
+                    nmpVerifPassAllNode,
+                    nmpVerifAllNode,
+                    nmpVerifPassAllNode*100.0/nmpVerifAllNode
+                );
+
+                printf(
+                    "nmp in curnodes stats : %d/%d = %.2f%%\n",
+                    nmpVerifPassCutNode,
+                    nmpVerifCutNode,
+                    nmpVerifPassCutNode*100.0/nmpVerifCutNode
+                );
+
+                quiethistPreStat.print("quiethistPre");
+                capthistPreStat.print("capthistPre");
+                quiethistPostStat.print("quiethistPost");
+                capthistPostStat.print("capthistPost");
+                TIupdateAddStat.print("TIupdateAdd");
+                TIupdateRemStat.print("TIupdateRem");
+                TIupdateTotStat.print("TIupdateTot");
+                TIupdateDiffStat.print("TIupdateDiff");
+                matScalingStats.print("matScaling");
+
+#endif
+
+            }else if(command=="arch"){
+
+#ifdef __AVX512F__
+
+                printf("arch: AVX512\n");
+
+#elif defined(__AVX2__)
+
+                printf("arch: AVX2\n");
+
+#elif defined(__AVX__)
+
+                printf("arch: AVX\n");
+
+#elif defined(__SSE2__)
+
+                printf("arch: SSE2\n");
+
+#else
+
+                printf("arch: unknow\n");
+
+#endif
+
+            }else if(command=="quit"){
+
+                stop_all=true;
+
+            }else if(command=="position"){
+
+                state->movesFromRoot.clear();
+
+                for(
+                    unsigned long iarg=0;
+                    iarg<parsed.size();
+                    iarg++
+                ){
+
+                    auto arg=parsed[iarg];
+
+                    if(arg.first=="fen"){
+
+                        state->root.fromFen(
+                            arg.second
+                        );
+                    }
+
+                    if(arg.first=="startpos"){
+
+                        state->root.fromFen(
+                            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+                        );
+
+                    }else if(arg.first=="kiwipete"){
+
+                        state->root.fromFen(
+                            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - "
+                        );
+
+                    }else if(arg.first=="moves"){
+
+                        istringstream moves(
+                            arg.second
+                        );
+
+                        string curMove;
+
+                        while(moves>>curMove){
+
+                            Move move;
+
+                            move.from_uci(curMove);
+
+                            state->movesFromRoot.push_back(
+                                move
+                            );
+                        }
+
+                    }else if(arg.first=="frc"){
+
+                        state->root.setDFRC(
+                            stoi(arg.second),
+                            stoi(arg.second)
+                        );
+
+                    }else if(arg.first=="dfrc"){
+
+                        istringstream ids(
+                            arg.second
+                        );
+
+                        int idwhite;
+                        int idblack;
+
+                        ids>>idwhite>>idblack;
+
+                        state->root.setDFRC(
+                            idwhite,
+                            idblack
+                        );
+                    }
+                }
+
+            }else if(command=="go"){
+
+                bool printmove=true;
+
+                bestMoveResponse res=
+                    goCommand(
+                        parsed,
+                        *state,
+                        true,
+                        printmove
+                    );
+
+                Move bm=get<0>(res);
+                Move ponder=get<1>(res);
+
+                if(printmove){
+
+                    if(
+                        ponder.moveInfo==
+                        nullMove.moveInfo
+                    ){
+
+                        printf(
+                            "bestmove %s\n",
+                            bm.moveInfo==
+                            nullMove.moveInfo
+                                ? "0000"
+                                : bm.to_str().c_str()
+                        );
+
+                    }else{
+
+                        printf(
+                            "bestmove %s ponder %s\n",
+                            bm.to_str().c_str(),
+                            ponder.to_str().c_str()
+                        );
+                    }
+
+                    lastMove=ponder;
+
+                    bestMoveFinder->aging();
+                }
+
+            }else if(command=="uci"){
+
+                printUCIInfo();
+
+            }else if(command=="setoption"){
+
+                string optionName;
+                string optionValue;
+
+                for(const auto& item:parsed){
+
+                    if(item.first=="name")
+                        optionName=item.second;
+
+                    else if(item.first=="value")
+                        optionValue=item.second;
+                }
+
+                string opt=optionName;
+
+                transform(
+                    opt.begin(),
+                    opt.end(),
+                    opt.begin(),
+                    [](unsigned char c){
+                        return (char)tolower(c);
+                    }
+                );
+
+                try{
+
+                    if(
+                        opt=="hash" &&
+                        !optionValue.empty()
+                    ){
+
+                        bestMoveFinder->reinit(
+                            stoull(optionValue)*hashMul
+                        );
+
+                    }else if(
+                        opt=="move overhead" &&
+                        !optionValue.empty()
+                    ){
+
+                        moveOverhead=stoi(
+                            optionValue
+                        );
+
+                    }else if(opt=="clear hash"){
+
+                        bestMoveFinder->clear();
+
+                    }else if(
+                        opt=="threads" &&
+                        !optionValue.empty()
+                    ){
+
+                        int newT=max(
+                            1,
+                            stoi(optionValue)
+                        );
+
+                        bestMoveFinder->setThreads(
+                            newT
+                        );
+
+                        nbThreads=newT;
+
+                    }else if(opt=="syzygypath"){
+
+                        tbProbe.init(
+                            optionValue
+                        );
+
+                        if(tbProbe.isAvailable())
+
+                            printf(
+                                "info string Syzygy tablebases loaded, max %d pieces\n",
+                                tbProbe.maxPieces()
                             );
 
                         else
 
                             printf(
-                                "| %+1.2f ",
-                                evals[i].second/100.0
+                                "info string Could not find any tablebases at '%s'\n",
+                                optionValue.c_str()
+                            );
+
+                    }else if(
+                        opt=="syzygyprobedepth" &&
+                        !optionValue.empty()
+                    ){
+
+                        tbProbe.setProbeDepth(
+                            stoi(optionValue)
+                        );
+
+                    }else if(
+                        opt=="syzygyprobelimit" &&
+                        !optionValue.empty()
+                    ){
+
+                        tbProbe.setProbeLimit(
+                            stoi(optionValue)
+                        );
+
+                    }else if(opt=="minimal"){
+
+                        bestMoveFinder->minimal=
+                            (
+                                optionValue=="true" ||
+                                optionValue=="1"
+                            );
+
+                    }else if(opt=="uci_showwdl"){
+
+                        WDLmodel::enabled=
+                            (
+                                optionValue=="true" ||
+                                optionValue=="1"
+                            );
+
+                    }else if(opt=="uci_chess960"){
+
+                        isdfrc=
+                            (
+                                optionValue=="true" ||
+                                optionValue=="1"
                             );
                     }
-                }
 
-                printf("|\n");
-            }
-
-            for(int i=0;i<8;i++)
-                printf("+-------");
-
-            printf("+\n");
-
-            snap.restore(state->root);
-
-            printf(
-                "static evaluation: %d cp\n",
-                overall_eval
-            );
-
-        }else if(command=="raweval"){
-
-            PositionSnapshot snap;
-            snap.save(state->root);
-
-            for(Move move:state->movesFromRoot)
-                state->root.playPartialMove(move);
-
-            ieval->init(state->root);
-
-            int overall_eval=
-                ieval->getRaw(
-                    state->root.friendlyColor()
-                );
-
-            snap.restore(state->root);
-
-            printf(
-                "%d cp\n",
-                overall_eval
-            );
-
-        }else if(command=="ucinewgame"){
-
-            bestMoveFinder.clear();
-            lastMove=nullMove;
-
-        }else if(command=="version"){
-
-        #ifdef COMMIT
-            printf(
-                "version: %s\n",
-                COMMIT
-            );
-        #else
-            printf("version: test\n");
-        #endif
-
-        }else if(command=="bench"){
-
-            int sumNodes[maxDepth+1];
-            int sumNPS=0;
-            int sumTime=0;
-
-            int histDepth[maxDepth+1];
-            int sumSelDepth[maxDepth+1];
-
-            for(int i=0;i<=maxDepth;i++){
-                sumNodes[i]=0;
-                histDepth[i]=0;
-                sumSelDepth[i]=0;
-            }
-
-            int maxDepthAttain=0;
-
-            vector<pair<int,int>> Scores;
-
-            if(parsed.size()==0)
-                parsed={{"depth","10"}};
-
-            for(
-                unsigned idFen=0;
-                idFen<benches.size();
-                idFen++
-            ){
-
-                if(DEBUG){
+                }catch(const exception&){
 
                     printf(
-                        "\rposition %d/%d",
-                        idFen,
-                        (int)benches.size()
+                        "info string Ignoring invalid option '%s' value '%s'\n",
+                        optionName.c_str(),
+                        optionValue.c_str()
                     );
-
-                    fflush(stdout);
                 }
 
-                auto testState=
-                    make_unique<Chess>();
+            }else if(command=="runSEE"){
 
-                testState->movesFromRoot={};
+                PositionSnapshot snap;
 
-                testState->root.fromFen(
-                    benches[idFen]
+                snap.save(state->root);
+
+                for(Move move:state->movesFromRoot)
+                    state->root.playPartialMove(move);
+
+                istringstream moves(
+                    parsed[0].second
                 );
 
-                bestMoveFinder.clear();
+                string curMove;
 
-                bool _;
+                bool isExact=true;
 
-                bestMoveResponse res=
-                    goCommand(
-                        parsed,
-                        *testState,
-                        false,
-                        _
-                    );
+                while(moves>>curMove){
 
-                vector<depthInfo> infos=
-                    get<3>(res);
-
-                if(DEBUG)
-
-                    printf(
-                        "fen: %s score: %d nodes: %" PRId64 "\n",
-                        testState->root.toFen().c_str(),
-                        get<2>(res),
-                        infos.empty()
-                            ? 0
-                            : infos.back().node
-                    );
-
-                for(depthInfo info:infos){
-
-                    sumNodes[info.depth]+=info.node;
-                    histDepth[info.depth]++;
-                    sumSelDepth[info.depth]+=info.seldepth;
-
-                    if(info.depth==maxDepth)
-                        printf(
-                            "\n%s\n",
-                            benches[idFen].c_str()
-                        );
-
-                    maxDepthAttain=
-                        max(
-                            maxDepthAttain,
-                            info.depth
-                        );
-                }
-
-                if(infos.size()){
-
-                    depthInfo lastInfo=
-                        infos[infos.size()-1];
-
-                    sumNPS+=lastInfo.node;
-                    sumTime+=lastInfo.time;
-
-                    Scores.push_back({
-                        lastInfo.depth,
-                        lastInfo.node
-                    });
-                }
-            }
-
-            if(DEBUG){
-
-                printf(
-                    "\rposition %d/%d\n",
-                    (int)benches.size(),
-                    (int)benches.size()
-                );
-
-                printf("depth\t");
-
-                for(
-                    int i=0;
-                    i<=maxDepthAttain;
-                    i++
-                )
-                    printf("\t%d",i);
-
-                printf("\nnodes\t");
-
-                for(
-                    int i=0;
-                    i<=maxDepthAttain;
-                    i++
-                ){
-
-                    if(histDepth[i])
-
-                        printf(
-                            "\t%d",
-                            sumNodes[i]/histDepth[i]
-                        );
-
-                    else
-                        printf("\t0");
-                }
-
-                printf("\nseldepth");
-
-                for(
-                    int i=0;
-                    i<=maxDepthAttain;
-                    i++
-                ){
-
-                    if(histDepth[i])
-
-                        printf(
-                            "\t%d",
-                            sumSelDepth[i]/histDepth[i]
-                        );
-
-                    else
-                        printf("\t0");
-                }
-
-                printf(
-                    "\n%.0fnps\n",
-                    sumNPS*1000.0/sumTime
-                );
-            }
-
-            sort(
-                Scores.begin(),
-                Scores.end()
-            );
-
-            int size=Scores.size();
-
-            pair<int,big> scoreThird={0.0,0.0};
-            pair<int,big> scoreAll={0.0,0.0};
-
-            for(int i=0;i<size;i++){
-
-                pair<int,big> locScore={
-                    Scores[i].first,
-                    Scores[i].second
-                };
-
-                scoreAll.first+=locScore.first;
-                scoreAll.second+=locScore.second;
-
-                if(
-                    i>=size/3 &&
-                    i<size*2/3
-                ){
-
-                    scoreThird.first+=
-                        locScore.first;
-
-                    scoreThird.second+=
-                        locScore.second;
-                }
-            }
-
-            if(DEBUG)
-
-                printf(
-                    "search score: (%d %" PRId64 ") (%d %" PRId64 ")\n",
-                    scoreThird.first,
-                    scoreThird.second,
-                    scoreAll.first,
-                    scoreAll.second
-                );
-
-            printf(
-                "%" PRId64 " nodes %.0f nps\n",
-                scoreAll.second,
-                sumNPS*1000.0/sumTime
-            );
-
-        #ifdef DEBUG_MACRO
-
-            diffsStat.print(
-                "corrhist applied"
-            );
-
-            printf(
-                "nmp in allnodes stats : %d/%d = %.2f%%\n",
-                nmpVerifPassAllNode,
-                nmpVerifAllNode,
-                nmpVerifPassAllNode*100.0/nmpVerifAllNode
-            );
-
-            printf(
-                "nmp in curnodes stats : %d/%d = %.2f%%\n",
-                nmpVerifPassCutNode,
-                nmpVerifCutNode,
-                nmpVerifPassCutNode*100.0/nmpVerifCutNode
-            );
-
-            quiethistPreStat.print("quiethistPre");
-            capthistPreStat.print("capthistPre");
-            quiethistPostStat.print("quiethistPost");
-            capthistPostStat.print("capthistPost");
-            TIupdateAddStat.print("TIupdateAdd");
-            TIupdateRemStat.print("TIupdateRem");
-            TIupdateTotStat.print("TIupdateTot");
-            TIupdateDiffStat.print("TIupdateDiff");
-            matScalingStats.print("matScaling");
-
-        #endif
-
-        }else if(command=="arch"){
-
-        #ifdef __AVX512F__
-
-            printf("arch: AVX512\n");
-
-        #elif defined(__AVX2__)
-
-            printf("arch: AVX2\n");
-
-        #elif defined(__AVX__)
-
-            printf("arch: AVX\n");
-
-        #elif defined(__SSE2__)
-
-            printf("arch: SSE2\n");
-
-        #else
-
-            printf("arch: unknow\n");
-
-        #endif
-
-        }else if(command=="quit"){
-
-            stop_all=true;
-
-        }else if(command=="position"){
-
-            state->movesFromRoot.clear();
-
-            for(
-                unsigned long iarg=0;
-                iarg<parsed.size();
-                iarg++
-            ){
-
-                auto arg=parsed[iarg];
-
-                if(arg.first=="fen"){
-
-                    state->root.fromFen(
-                        arg.second
-                    );
-                }
-
-                if(arg.first=="startpos"){
-
-                    state->root.fromFen(
-                        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-                    );
-
-                }else if(arg.first=="kiwipete"){
-
-                    state->root.fromFen(
-                        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - "
-                    );
-
-                }else if(arg.first=="moves"){
-
-                    istringstream moves(
-                        arg.second
-                    );
-
-                    string curMove;
-
-                    while(moves>>curMove){
-
-                        Move move;
-
-                        move.from_uci(curMove);
-
-                        state->movesFromRoot.push_back(
-                            move
-                        );
+                    if(curMove=="ge"){
+                        isExact=false;
+                        continue;
                     }
 
-                }else if(arg.first=="frc"){
+                    Move move;
 
-                    state->root.setDFRC(
-                        stoi(arg.second),
-                        stoi(arg.second)
-                    );
+                    move.from_uci(curMove);
 
-                }else if(arg.first=="dfrc"){
+                    int piece=
+                        type(
+                            state->root.getfullPiece(
+                                move.from()
+                            )
+                        );
 
-                    istringstream ids(
-                        arg.second
-                    );
+                    int capture=
+                        type(
+                            state->root.getfullPiece(
+                                move.to()
+                            )
+                        );
 
-                    int idwhite;
-                    int idblack;
+                    if(
+                        capture==SPACE &&
+                        piece==PAWN &&
+                        abs(move.from()-move.to())!=8 &&
+                        abs(move.from()-move.to())!=16
+                    ){
 
-                    ids>>idwhite>>idblack;
+                        move.setFlag(
+                            Move::fep
+                        );
 
-                    state->root.setDFRC(
-                        idwhite,
-                        idblack
+                        capture=0;
+                    }
+
+                    int res;
+
+                    const int value_pieces[7]={
+                        100,
+                        300,
+                        300,
+                        500,
+                        900,
+                        100000,
+                        0
+                    };
+
+                    if(isExact){
+
+                        res=
+                            -fastSEE(
+                                move,
+                                state->root,
+                                value_pieces
+                            );
+
+                        if(capture==SPACE)
+                            res+=value_pieces[capture];
+
+                    }else{
+
+                        res=
+                            see_ge(
+                                0,
+                                move,
+                                state->root,
+                                value_pieces
+                            );
+                    }
+
+                    printf(
+                        "%s : %d\n",
+                        move.to_str().c_str(),
+                        res
                     );
                 }
-            }
 
-        }else if(command=="go"){
+                snap.restore(
+                    state->root
+                );
 
-                        // Keep the UCI loop responsive while search is running, as in
-                        // Spaghet. STOP/POSITION/QUIT are handled by the same loop.
-                        waitForSearch();
+            }else if(command=="debug"){
 
-                        bool printmove=true;
+                if(parsed[0].second=="off")
+                    DEBUG=false;
 
-                        searchThread=thread([&, parsed, printmove]() mutable {
-                            bestMoveResponse res=
-                                goCommand(
-                                    parsed,
-                                    *state,
-                                    true,
-                                    printmove
-                                );
+                else
+                    DEBUG=true;
 
-                            Move bm=get<0>(res);
-                            Move ponder=get<1>(res);
+            }else if(command=="print"){
 
-                            if(printmove && !stop_all){
-                                if(ponder.moveInfo==nullMove.moveInfo){
-                                    printf(
-                                        "bestmove %s\n",
-                                        bm.moveInfo==nullMove.moveInfo
-                                            ? "0000"
-                                            : bm.to_str().c_str()
-                                    );
-                                }else{
-                                    printf(
-                                        "bestmove %s ponder %s\n",
-                                        bm.to_str().c_str(),
-                                        ponder.to_str().c_str()
-                                    );
-                                }
+                PositionSnapshot snap;
 
-                                fflush(stdout);
-                                lastMove=ponder;
-                                bestMoveFinder.aging();
-                            }
-                        });
+                snap.save(state->root);
 
-                    }else if(command=="uci"){
+                for(Move move:state->movesFromRoot)
+                    state->root.playPartialMove(move);
 
-            printUCIInfo();
+                state->root.print();
 
-        }else if(command=="setoption"){
+                snap.restore(state->root);
 
-            string optionName;
-            string optionValue;
+            }else if(command=="stats"){
 
-            for(const auto& item:parsed){
+#ifdef DEBUG_MACRO
 
-                if(item.first=="name")
-                    optionName=item.second;
-
-                else if(item.first=="value")
-                    optionValue=item.second;
-            }
-
-            string opt=optionName;
-
-            transform(
-                opt.begin(),
-                opt.end(),
-                opt.begin(),
-                [](unsigned char c){
-                    return (char)tolower(c);
-                }
-            );
-
-            try{
-
-                if(
-                    opt=="hash" &&
-                    !optionValue.empty()
-                ){
-
-                    bestMoveFinder.reinit(
-                        stoull(optionValue)*hashMul
-                    );
-
-                }else if(
-                    opt=="move overhead" &&
-                    !optionValue.empty()
-                ){
-
-                    moveOverhead=stoi(
-                        optionValue
-                    );
-
-                }else if(opt=="clear hash"){
-
-                    bestMoveFinder.clear();
-
-                }else if(
-                    opt=="threads" &&
-                    !optionValue.empty()
-                ){
-
-                    int newT=max(
-                        1,
-                        stoi(optionValue)
-                    );
-
-                    bestMoveFinder.setThreads(
-                        newT
-                    );
-
-                    nbThreads=newT;
-
-                }else if(opt=="syzygypath"){
-
-                    tbProbe.init(
-                        optionValue
-                    );
-
-                    if(tbProbe.isAvailable())
-
-                        printf(
-                            "info string Syzygy tablebases loaded, max %d pieces\n",
-                            tbProbe.maxPieces()
-                        );
-
-                    else
-
-                        printf(
-                            "info string Could not find any tablebases at '%s'\n",
-                            optionValue.c_str()
-                        );
-
-                }else if(
-                    opt=="syzygyprobedepth" &&
-                    !optionValue.empty()
-                ){
-
-                    tbProbe.setProbeDepth(
-                        stoi(optionValue)
-                    );
-
-                }else if(
-                    opt=="syzygyprobelimit" &&
-                    !optionValue.empty()
-                ){
-
-                    tbProbe.setProbeLimit(
-                        stoi(optionValue)
-                    );
-
-                }else if(opt=="minimal"){
-
-                    bestMoveFinder.minimal=
-                        (
-                            optionValue=="true" ||
-                            optionValue=="1"
-                        );
-
-                }else if(opt=="uci_showwdl"){
-
-                    WDLmodel::enabled=
-                        (
-                            optionValue=="true" ||
-                            optionValue=="1"
-                        );
-
-                }else if(opt=="uci_chess960"){
-
-                    isdfrc=
-                        (
-                            optionValue=="true" ||
-                            optionValue=="1"
-                        );
-                }
-
-            }catch(const exception&){
+                diffsStat.print(
+                    "corrhist applied"
+                );
 
                 printf(
-                    "info string Ignoring invalid option '%s' value '%s'\n",
-                    optionName.c_str(),
-                    optionValue.c_str()
+                    "nmp in allnodes stats : %d/%d = %.2f%%\n",
+                    nmpVerifPassAllNode,
+                    nmpVerifAllNode,
+                    nmpVerifPassAllNode*100.0/nmpVerifAllNode
                 );
-            }
-
-        }else if(command=="runSEE"){
-
-            PositionSnapshot snap;
-
-            snap.save(state->root);
-
-            for(Move move:state->movesFromRoot)
-                state->root.playPartialMove(move);
-
-            istringstream moves(
-                parsed[0].second
-            );
-
-            string curMove;
-
-            bool isExact=true;
-
-            while(moves>>curMove){
-
-                if(curMove=="ge"){
-                    isExact=false;
-                    continue;
-                }
-
-                Move move;
-
-                move.from_uci(curMove);
-
-                int piece=
-                    type(
-                        state->root.getfullPiece(
-                            move.from()
-                        )
-                    );
-
-                int capture=
-                    type(
-                        state->root.getfullPiece(
-                            move.to()
-                        )
-                    );
-
-                if(
-                    capture==SPACE &&
-                    piece==PAWN &&
-                    abs(move.from()-move.to())!=8 &&
-                    abs(move.from()-move.to())!=16
-                ){
-
-                    move.setFlag(
-                        Move::fep
-                    );
-
-                    capture=0;
-                }
-
-                int res;
-
-                const int value_pieces[7]={
-                    100,
-                    300,
-                    300,
-                    500,
-                    900,
-                    100000,
-                    0
-                };
-
-                if(isExact){
-
-                    res=
-                        -fastSEE(
-                            move,
-                            state->root,
-                            value_pieces
-                        );
-
-                    if(capture==SPACE)
-                        res+=value_pieces[capture];
-
-                }else{
-
-                    res=
-                        see_ge(
-                            0,
-                            move,
-                            state->root,
-                            value_pieces
-                        );
-                }
 
                 printf(
-                    "%s : %d\n",
-                    move.to_str().c_str(),
-                    res
+                    "nmp in curnodes stats : %d/%d = %.2f%%\n",
+                    nmpVerifPassCutNode,
+                    nmpVerifCutNode,
+                    nmpVerifPassCutNode*100.0/nmpVerifCutNode
                 );
+
+                quiethistPreStat.print(
+                    "quiethistPre"
+                );
+
+                capthistPreStat.print(
+                    "capthistPre"
+                );
+
+                quiethistPostStat.print(
+                    "quiethistPost"
+                );
+
+                capthistPostStat.print(
+                    "capthistPost"
+                );
+
+                TIupdateAddStat.print(
+                    "TIupdateAdd"
+                );
+
+                TIupdateRemStat.print(
+                    "TIupdateRem"
+                );
+
+                TIupdateTotStat.print(
+                    "TIupdateTot"
+                );
+
+                TIupdateDiffStat.print(
+                    "TIupdateDiff"
+                );
+
+                matScalingStats.print(
+                    "matScaling"
+                );
+
+#endif
+
+            }else if(command=="fen"){
+
+                PositionSnapshot snap;
+
+                snap.save(state->root);
+
+                for(Move move:state->movesFromRoot)
+                    state->root.playPartialMove(move);
+
+                printf(
+                    "%s\n",
+                    state->root.toFen().c_str()
+                );
+
+                snap.restore(state->root);
             }
 
-            snap.restore(
-                state->root
-            );
+            fflush(stdout);
 
-        }else if(command=="debug"){
+            {
+                lock_guard<mutex> lock(mtx_command);
+                exec_command=false;
+            }
 
-            if(parsed[0].second=="off")
-                DEBUG=false;
-
-            else
-                DEBUG=true;
-
-        }else if(command=="print"){
-
-            PositionSnapshot snap;
-
-            snap.save(state->root);
-
-            for(Move move:state->movesFromRoot)
-                state->root.playPartialMove(move);
-
-            state->root.print();
-
-            snap.restore(state->root);
-
-        }else if(command=="stats"){
-
-        #ifdef DEBUG_MACRO
-
-            diffsStat.print(
-                "corrhist applied"
-            );
-
-            printf(
-                "nmp in allnodes stats : %d/%d = %.2f%%\n",
-                nmpVerifPassAllNode,
-                nmpVerifAllNode,
-                nmpVerifPassAllNode*100.0/nmpVerifAllNode
-            );
-
-            printf(
-                "nmp in curnodes stats : %d/%d = %.2f%%\n",
-                nmpVerifPassCutNode,
-                nmpVerifCutNode,
-                nmpVerifPassCutNode*100.0/nmpVerifCutNode
-            );
-
-            quiethistPreStat.print(
-                "quiethistPre"
-            );
-
-            capthistPreStat.print(
-                "capthistPre"
-            );
-
-            quiethistPostStat.print(
-                "quiethistPost"
-            );
-
-            capthistPostStat.print(
-                "capthistPost"
-            );
-
-            TIupdateAddStat.print(
-                "TIupdateAdd"
-            );
-
-            TIupdateRemStat.print(
-                "TIupdateRem"
-            );
-
-            TIupdateTotStat.print(
-                "TIupdateTot"
-            );
-
-            TIupdateDiffStat.print(
-                "TIupdateDiff"
-            );
-
-            matScalingStats.print(
-                "matScaling"
-            );
-
-        #endif
-
-        }else if(command=="fen"){
-
-            PositionSnapshot snap;
-
-            snap.save(state->root);
-
-            for(Move move:state->movesFromRoot)
-                state->root.playPartialMove(move);
-
-            printf(
-                "%s\n",
-                state->root.toFen().c_str()
-            );
-
-            snap.restore(state->root);
+            cv_command.notify_one();
         }
 
-    }
+        if(!stop_all && endQ==startQ){
 
-    bestMoveFinder.running=false;
-    waitForSearch();
+            fflush(stdout);
+
+            unique_lock<mutex> lock(
+                mtx_new_command
+            );
+
+            cv_new_command.wait(
+                lock,
+                []{
+                    return endQ!=startQ ||
+                           stop_all;
+                }
+            );
+        }
+    }
 }
 
 int main(int argc,char** argv){
-    (void)argc;
-    (void)argv;
+
+    // Construct the search engine only after main() has started.
+    // The previous global construction allocated/initialized the search
+    // engine before main(), which is undesirable for Android GUI startup.
+    bestMoveFinder = new BestMoveFinder(alloted_space);
+
+    string UCI_instruction="programStart";
+
+    thread t;
+
+    bool seeInput=true;
+
+    if(argc>1){
+
+        startQ=endQ=0;
+
+        seeInput=false;
+
+        if(
+            string(argv[argc-1])==
+            string("continue")
+        ){
+            argc--;
+            seeInput=true;
+        }
+
+        for(int i=1;i<argc;i++){
+
+            inpQueue[endQ%sizeQ]=argv[i];
+
+            endQ++;
+        }
+
+        if(!seeInput){
+
+            inpQueue[endQ%sizeQ]="quit";
+
+            endQ++;
+        }
+    }
+
+    if(seeInput)
+        t=thread(&manageInput);
 
     manageSearch();
 
+    if(seeInput)
+        t.join();
+
     clear_table();
-    return 0;
+
+    delete bestMoveFinder;
+    bestMoveFinder = nullptr;
 }
