@@ -19,26 +19,37 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install Android NDK
-        uses: android-actions/setup-android@v3
+      # Install the NDK directly. This avoids sdkmanager's package/license
+      # failure in android-actions/setup-android.
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
 
       - name: Build ARM64 Android engine
         working-directory: core
+        shell: bash
         run: |
           set -euxo pipefail
-          NDK_DIR="$(find "$ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
-          test -n "$NDK_DIR"
-          TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          : "${ANDROID_NDK_HOME:?Android NDK setup did not define ANDROID_NDK_HOME}"
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$TOOLCHAIN/aarch64-linux-android24-clang"
           export CC="$TOOLCHAIN/aarch64-linux-android24-clang"
           export CXX="$TOOLCHAIN/aarch64-linux-android24-clang++"
           make clean || true
           make -j2 ANDROID=true CC="$CC" CXX="$CXX" ARCH=armv8-a+simd OPT="-O3 -flto -funroll-loops"
-          BIN="$(find . -maxdepth 1 -type f -name 'prune-*' ! -name '*.d' | head -n 1)"
-          test -n "$BIN"
+          BIN="$(find . -maxdepth 1 -type f -name 'prune-*' ! -name '*.d' -print -quit)"
+          if [[ -z "$BIN" ]]; then
+            echo "Build completed without producing a prune-* executable."
+            ls -la
+            exit 1
+          fi
           file "$BIN"
           readelf -h "$BIN" | grep -E 'Class:.*ELF64|Machine:.*AArch64'
           mkdir -p ../dist
           cp "$BIN" ../dist/prune-android-arm64
+
       - name: Upload Android binary
         uses: actions/upload-artifact@v4
         with:
