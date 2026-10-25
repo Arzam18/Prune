@@ -1,0 +1,46 @@
+name: Build Prune for Android ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/android.yml"
+      - "core/**"
+      - "Fathom/src/**"
+      - "nn-name.txt"
+
+permissions:
+  contents: read
+
+jobs:
+  android-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Android NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build ARM64 Android engine
+        working-directory: core
+        run: |
+          set -euxo pipefail
+          NDK_DIR="$(find "$ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          test -n "$NDK_DIR"
+          TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC="$TOOLCHAIN/aarch64-linux-android24-clang"
+          export CXX="$TOOLCHAIN/aarch64-linux-android24-clang++"
+          make clean || true
+          make -j2 ANDROID=true CC="$CC" CXX="$CXX" ARCH=armv8-a+simd OPT="-O3 -flto -funroll-loops"
+          BIN="$(find . -maxdepth 1 -type f -name 'prune-*' ! -name '*.d' | head -n 1)"
+          test -n "$BIN"
+          file "$BIN"
+          readelf -h "$BIN" | grep -E 'Class:.*ELF64|Machine:.*AArch64'
+          mkdir -p ../dist
+          cp "$BIN" ../dist/prune-android-arm64
+      - name: Upload Android binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: prune-android-arm64
+          path: dist/prune-android-arm64
