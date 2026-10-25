@@ -17,7 +17,11 @@ SHELL := /bin/bash
 FATHOM_DIR = ../Fathom/src
 FATHOM_OBJ = tbprobe.o
 COM=$(shell git rev-parse HEAD)
+ifeq ($(ANDROID), true)
+ARCH?=armv8-a+simd
+else
 ARCH?=native
+endif
 EXE?=
 SOURCES := $(wildcard *.cpp)
 SOURCES := $(filter-out collectData.cpp,$(SOURCES))
@@ -78,7 +82,18 @@ ifneq ($(ARCH), unknow)
 else
 	ARCHCOM=
 endif
-ARCHSIZE=-march=native
+# Android/ARM builds must not inherit host-specific x86 flags.
+ifeq ($(ANDROID), true)
+	ARCHSIZE=
+else
+	ARCHSIZE=-march=native
+endif
+# Android's clang targets are 64-bit without the desktop-only -m64 flag.
+ifeq ($(ANDROID), true)
+	M64=
+else
+	M64=-m64
+endif
 ifeq ($(ARCH), x86-64-v2)
 	ARCHSIZE = -DARCHSIZE=128
 else ifeq ($(ARCH), x86-64-v3)
@@ -140,7 +155,7 @@ override CPPFLAGS += $(myCPPFLAGS) $(NOTMAIN) $(OPT) $(ARCHCOM)
 override LDFLAGS += $(myLDFLAGS)
 
 all: $(MAIN) $(OBJECTS)
-	$(CXX) -m64 $(myCPPFLAGS) $(OPT) $(ARCHCOM) -o $(NAME) $(VERSIONNING) $^ $(LDFLAGS) $(MAINFLAGS)
+	$(CXX) $(M64) $(myCPPFLAGS) $(OPT) $(ARCHCOM) -o $(NAME) $(VERSIONNING) $^ $(LDFLAGS) $(MAINFLAGS)
 
 download:
 	@if [ ! -f $(NETNAME).bin ]; then \
@@ -152,7 +167,7 @@ download:
 	fi
 
 permute: permute.cpp
-	$(CXX) -m64 $(OPT) $(ARCHSIZE) -D_CRT_SECURE_NO_WARNINGS -std=gnu++17 -o permute $(VERSIONNING) permute.cpp $(LDFLAGS)
+	$(CXX) $(M64) $(OPT) $(ARCHSIZE) -D_CRT_SECURE_NO_WARNINGS -std=gnu++17 -o permute $(VERSIONNING) permute.cpp $(LDFLAGS)
 
 $(NETNAME): $(NEEDINGFILE)
 
@@ -160,12 +175,12 @@ model.bin: $(NETNAME) permute
 	./permute $(NETNAME).bin model.bin
 
 prune: $(MAIN) $(OBJECTS)
-	$(CXX) -m64 $(myCPPFLAGS) $(OPT) $(ARCHCOM) -o $(SHORTNAME) $^ $(VERSIONNING) $(LDFLAGS) $(MAINFLAGS)
+	$(CXX) $(M64) $(myCPPFLAGS) $(OPT) $(ARCHCOM) -o $(SHORTNAME) $^ $(VERSIONNING) $(LDFLAGS) $(MAINFLAGS)
 
 -include $(DEPENDS)
 
 embeder.o: embeder.cpp $(THENET)
-	$(CXX) -m64 $(myCPPFLAGS) -O3 $(ARCHCOM) -c $(VERSIONNING) -o $@ embeder.cpp
+	$(CXX) $(M64) $(myCPPFLAGS) -O3 $(ARCHCOM) -c $(VERSIONNING) -o $@ embeder.cpp
 
 clean:
 	rm -f $(OBJECTS) $(DEPENDS)
