@@ -1,5 +1,7 @@
 #include "TranspositionTable.hpp"
 #include <cmath>
+#include <cstdlib>
+#include <new>
 #include <cstring>
 #include <thread>
 #include "Const.hpp"
@@ -179,9 +181,21 @@ void transpositionTable::reinit(size_t count) {
     size = ((size - 1) / alignment + 1) * alignment;
 #ifdef _WIN32
     table = (Cluster*)(_aligned_malloc(size, alignment));
+#elif defined(__ANDROID__)
+    // Android's libc++ may not expose std::aligned_alloc for this target.
+    // POSIX memalign is available in Android's Bionic libc and free() releases it.
+    void* alignedTable = nullptr;
+    if (posix_memalign(&alignedTable, alignment, size) != 0) {
+        alignedTable = nullptr;
+    }
+    table = static_cast<Cluster*>(alignedTable);
 #else
     table = (Cluster*)std::aligned_alloc(alignment, size);
 #endif
+    if (table == nullptr) {
+        // Avoid clearing or using an invalid transposition table allocation.
+        throw std::bad_alloc();
+    }
 #ifdef MADV_HUGEPAGE
     madvise(table, count * sizeof(Cluster), MADV_HUGEPAGE);
 #endif
