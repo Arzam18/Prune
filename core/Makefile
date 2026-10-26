@@ -87,6 +87,11 @@ else
 		myLDFLAGS := $(myLDFLAGS) -lpthread
 	endif
 endif
+# The Android NDK's -static-libstdc++ selects static libc++ for C++ runtime
+# symbols, avoiding a dependency on libc++_shared.so at engine startup.
+ifeq ($(ANDROID), true)
+myLDFLAGS := $(myLDFLAGS) -static-libstdc++
+endif
 myCPPFLAGS := $(myCPPFLAGS) $(DEBUGOPT)
 ifneq ($(ARCH), unknow)
 	ARCHCOM=-march=$(ARCH)
