@@ -74,7 +74,10 @@ ifeq ($(OS), Windows_NT)
 else
 	OS=$(shell uname -s)
 	PROCESSOR_ARCHITECTURE=$(shell uname -m)
-	myLDFLAGS := $(myLDFLAGS) -lpthread
+	# Android provides pthread symbols through libc; NDK has no separate -lpthread.
+	ifneq ($(ANDROID), true)
+		myLDFLAGS := $(myLDFLAGS) -lpthread
+	endif
 endif
 myCPPFLAGS := $(myCPPFLAGS) $(DEBUGOPT)
 ifneq ($(ARCH), unknow)
