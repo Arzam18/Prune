@@ -36,6 +36,11 @@ SOURCES := $(filter-out datasetStats.cpp,$(SOURCES))
 SOURCES := $(filter-out quantise.cpp,$(SOURCES))
 SOURCES := $(filter-out permute.cpp,$(SOURCES))
 OBJECTS := $(SOURCES:%.cpp=%.o) $(FATHOM_OBJ)
+# Android cannot use this source tree's C++23 #embed implementation with the
+# NDK Clang version, so embed the network and magic data with a native .S object.
+ifeq ($(ANDROID), true)
+OBJECTS += embedded_data.o
+endif
 DEPENDS := $(OBJECTS:%.o=%.d)
 
 MAIN?=engine.cpp
@@ -185,8 +190,15 @@ prune: $(MAIN) $(OBJECTS)
 
 -include $(DEPENDS)
 
-embeder.o: embeder.cpp $(THENET)
+embeder.o: embeder.cpp embeder.hpp $(THENET)
 	$(CXX) $(M64) $(myCPPFLAGS) -O3 $(ARCHCOM) -c $(VERSIONNING) -o $@ embeder.cpp
+
+# Use the target assembler to include binary network data on Android. This avoids
+# #embed, which is not supported by the NDK Clang shipped with the Android runner.
+ifeq ($(ANDROID), true)
+embedded_data.o: embedded_data.S model.bin magics.out
+	$(CC) $(filter -D%,$(myCPPFLAGS)) $(filter -D%,$(NOTMAIN)) -c -o $@ embedded_data.S
+endif
 
 clean:
 	rm -f $(OBJECTS) $(DEPENDS)
