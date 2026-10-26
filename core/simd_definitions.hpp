@@ -2,6 +2,14 @@
 #define SIMD_DEFINITIONS_HPP
 #include <cstdint>
 
+// Android's AArch64 Clang toolchain always provides Advanced SIMD (NEON),
+// but some toolchain configurations expose __aarch64__ without the spelling
+// this project originally tested. Normalize that here so both this header
+// and SIMD implementation files select the NEON backend consistently.
+#if defined(__aarch64__) && !defined(__ARM_NEON__)
+#define __ARM_NEON__ 1
+#endif
+
 #if defined(__x86_64__)
 #include <immintrin.h>
 
