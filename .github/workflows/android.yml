@@ -40,8 +40,16 @@ jobs:
           readelf -h "$BIN" | grep -E 'Class:.*ELF64|Machine:.*AArch64'
           mkdir -p ../dist
           cp "$BIN" ../dist/prune-android-arm64
-      - name: Upload Android binary
+          # Package the NDK C++ shared runtime alongside the engine. Some Android
+          # loaders cannot start the executable when libc++_shared.so is absent.
+          CXX_RUNTIME="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+          test -f "$CXX_RUNTIME"
+          cp "$CXX_RUNTIME" ../dist/libc++_shared.so
+          echo "Packaged runtime dependency:"
+          readelf -d ../dist/prune-android-arm64 | grep -E 'NEEDED.*(libc\+\+_shared|libc\.so|libm\.so)' || true
+          ls -lh ../dist
+      - name: Upload Android engine and runtime
         uses: actions/upload-artifact@v4
         with:
           name: prune-android-arm64
-          path: dist/prune-android-arm64
+          path: dist/*
