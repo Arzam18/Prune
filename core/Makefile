@@ -1,5 +1,8 @@
 CXX=clang++
 CC=clang
+# Build-time tools must run on the GitHub Actions host, not on Android.
+HOSTCXX ?= c++
+HOSTOPT ?= -O2
 
 ADDOPTION?=
 DEBUGOPT?=
@@ -170,7 +173,7 @@ download:
 	fi
 
 permute: permute.cpp
-	$(CXX) $(M64) $(OPT) $(ARCHSIZE) -D_CRT_SECURE_NO_WARNINGS -std=gnu++17 -o permute $(VERSIONNING) permute.cpp $(LDFLAGS)
+	$(HOSTCXX) $(HOSTOPT) -D_CRT_SECURE_NO_WARNINGS -std=gnu++17 -o permute $(VERSIONNING) permute.cpp
 
 $(NETNAME): $(NEEDINGFILE)
 
