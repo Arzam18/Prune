@@ -97,13 +97,30 @@ jobs:
               return 1
             fi
 
-            model_symbol_size="$(awk '{print $3}' <<< "$model_line")"
-            magics_symbol_size="$(awk '{print $3}' <<< "$magics_line")"
-            echo "NNUE object symbol size: $model_symbol_size (expected $model_size)"
-            echo "Magic object symbol size: $magics_symbol_size (expected $magics_size)"
+            model_symbol_size_raw="$(awk '{print $3}' <<< "$model_line")"
+            magics_symbol_size_raw="$(awk '{print $3}' <<< "$magics_line")"
 
-            [[ "$model_symbol_size" =~ ^[0-9]+$ ]]
-            [[ "$magics_symbol_size" =~ ^[0-9]+$ ]]
+            # GNU readelf may print symbol sizes as decimal, while LLVM
+            # readelf prints them as hexadecimal (for example, 0x3526900).
+            # Normalize both formats before comparing against stat's decimal
+            # byte count. The prior check rejected valid hexadecimal sizes.
+            normalize_symbol_size() {
+              local raw="${1,,}"
+              if [[ "$raw" =~ ^0x[0-9a-f]+$ ]]; then
+                printf '%d' "$((raw))"
+              elif [[ "$raw" =~ ^[0-9]+$ ]]; then
+                printf '%d' "$((10#$raw))"
+              else
+                echo "ERROR: unrecognized ELF symbol size: $1" >&2
+                return 1
+              fi
+            }
+
+            model_symbol_size="$(normalize_symbol_size "$model_symbol_size_raw")"
+            magics_symbol_size="$(normalize_symbol_size "$magics_symbol_size_raw")"
+            echo "NNUE object symbol size: $model_symbol_size_raw bytes ($model_symbol_size normalized; expected $model_size)"
+            echo "Magic object symbol size: $magics_symbol_size_raw bytes ($magics_symbol_size normalized; expected $magics_size)"
+
             [[ "$model_symbol_size" -eq "$model_size" ]]
             [[ "$magics_symbol_size" -eq "$magics_size" ]]
           }
