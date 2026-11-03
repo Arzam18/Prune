@@ -452,8 +452,16 @@ void manageSearch(bool seeInput) {
                 printf("arch: AVX\n");
 #elif defined(__SSE2__)
                 printf("arch: SSE2\n");
+#elif defined(__ARM_FEATURE_MATMUL_INT8)
+                printf("arch: ARM64 NEON I8MM\n");
+#elif defined(__ARM_FEATURE_DOTPROD)
+                printf("arch: ARM64 NEON DOTPROD\n");
+#elif defined(__ARM_NEON__)
+                printf("arch: ARM64 NEON\n");
+#elif defined(__aarch64__)
+                printf("arch: ARM64\n");
 #else
-                printf("arch: unknow\n");
+                printf("arch: unknown\n");
 #endif
             } else if (command == "quit") {
                 stop_all = true;
