@@ -48,33 +48,69 @@ jobs:
 
           echo "NDK: $NDK_DIR"
           "$CXX" --version
-          echo "Target feature check:"
+          echo "Dotprod target feature check:"
           printf '' | "$CXX" -march=armv8.2-a+dotprod -dM -E -x c++ - | grep '__ARM_FEATURE_DOTPROD'
 
-          # The engine and NEON backend use 128-bit vectors. Force the host-side
-          # converter to generate that exact layout rather than depending on the
-          # GitHub runner's default x86 SIMD flags.
+          # Both Android builds use 128-bit NEON registers, so the network
+          # converter must use the 128-bit layout for both variants.
           HOSTCXX="$(command -v c++)"
           HOSTOPT="-O2 -DARCHSIZE=128 -DPRUNE_ANDROID_NEON_LAYOUT=1"
 
-          # Rebuild the converter/model from the source network with the explicit
-          # 128-bit layout. This also prevents a stale model.bin from being reused.
           rm -f permute model.bin
           make clean || true
-          make -j2 ANDROID=true \
-            CC="$CC" CXX="$CXX" HOSTCXX="$HOSTCXX" HOSTOPT="$HOSTOPT" \
-            ARCH=armv8-a+simd EXE=prune-android-arm64-neon \
-            OPT="-O3 -flto -funroll-loops -mtune=cortex-a76 -fPIE" \
-            LDFLAGS="-pie"
 
-          mkdir -p ../dist
-          cp prune-android-arm64-neon ../dist/
-          MODEL_SIZE="$(stat -c '%s' model.bin)"
-          MAGICS_SIZE="$(stat -c '%s' magics.out)"
+          build_variant() {
+            local arch="$1"
+            local output="$2"
+            local extra_opt="$3"
+
+            echo "============================================================"
+            echo "Building $output with -march=$arch"
+            echo "============================================================"
+
+            make -j2 ANDROID=true \
+              CC="$CC" CXX="$CXX" HOSTCXX="$HOSTCXX" HOSTOPT="$HOSTOPT" \
+              ARCH="$arch" EXE="$output" \
+              OPT="-O3 -flto -funroll-loops -mtune=cortex-a76 -fPIE $extra_opt" \
+              LDFLAGS="-pie"
+
+            mkdir -p ../dist
+            cp "$output" "../dist/$output"
+          }
+
+          # The converted NNUE and magic table are included by embedded_data.S.
+          # Validate their exact sizes in that object file, where the assembler
+          # emits the original .size metadata. Do not depend on the final PIE's
+          # symbol table, which may be changed by LTO/linker processing.
+          verify_embedded_object() {
+            local model_size="$1"
+            local magics_size="$2"
+            local model_line magics_line model_symbol_size magics_symbol_size
+
+            test -s embedded_data.o
+            model_line="$(readelf -sW embedded_data.o | awk '$NF == "baseModel" { line=$0 } END { print line }')"
+            magics_line="$(readelf -sW embedded_data.o | awk '$NF == "magicsData" { line=$0 } END { print line }')"
+
+            if [[ -z "$model_line" || -z "$magics_line" ]]; then
+              echo "ERROR: embedded_data.o is missing baseModel or magicsData symbols"
+              readelf -sW embedded_data.o
+              return 1
+            fi
+
+            model_symbol_size="$(awk '{print $3}' <<< "$model_line")"
+            magics_symbol_size="$(awk '{print $3}' <<< "$magics_line")"
+            echo "NNUE object symbol size: $model_symbol_size (expected $model_size)"
+            echo "Magic object symbol size: $magics_symbol_size (expected $magics_size)"
+
+            [[ "$model_symbol_size" =~ ^[0-9]+$ ]]
+            [[ "$magics_symbol_size" =~ ^[0-9]+$ ]]
+            [[ "$model_symbol_size" -eq "$model_size" ]]
+            [[ "$magics_symbol_size" -eq "$magics_size" ]]
+          }
 
           verify_elf() {
             local bin="$1"
-            local header needed model_symbol_size magics_symbol_size
+            local header needed
 
             file "$bin"
             header="$(readelf -hW "$bin")"
@@ -82,37 +118,38 @@ jobs:
             printf '%s\n' "$header" | grep 'Machine:.*AArch64'
 
             needed="$(readelf -d "$bin" | grep 'NEEDED' || true)"
+            echo "Dynamic dependencies (Android system libraries are expected):"
             printf '%s\n' "$needed"
             if [[ "$needed" == *"libc++_shared.so"* ]]; then
               echo "ERROR: unexpected libc++_shared.so runtime dependency"
               return 1
             fi
-
-            model_symbol_size="$(readelf -sW "$bin" | awk '$8 == "baseModel" { print $3; exit }')"
-            magics_symbol_size="$(readelf -sW "$bin" | awk '$8 == "magicsData" { print $3; exit }')"
-            [[ "$model_symbol_size" =~ ^[0-9]+$ ]]
-            [[ "$magics_symbol_size" =~ ^[0-9]+$ ]]
-            [[ "$model_symbol_size" -eq "$MODEL_SIZE" ]]
-            [[ "$magics_symbol_size" -eq "$MAGICS_SIZE" ]]
-            echo "Embedded NNUE: ${model_symbol_size} bytes"
-            echo "Embedded magics: ${magics_symbol_size} bytes"
           }
 
+          # Convert once. Both targets are 128-bit NEON and therefore share
+          # the same correctly permuted model layout.
+          rm -f model.bin
+          make model.bin \
+            ANDROID=true CC="$CC" CXX="$CXX" HOSTCXX="$HOSTCXX" HOSTOPT="$HOSTOPT" \
+            ARCH=armv8-a+simd
+          MODEL_SIZE="$(stat -c '%s' model.bin)"
+          MAGICS_SIZE="$(stat -c '%s' magics.out)"
+          echo "Converted NNUE: $MODEL_SIZE bytes"
+          echo "Magic data: $MAGICS_SIZE bytes"
+
+          # Build the baseline NEON executable first.
+          build_variant armv8-a+simd prune-android-arm64-neon ""
+          verify_embedded_object "$MODEL_SIZE" "$MAGICS_SIZE"
           verify_elf ../dist/prune-android-arm64-neon
 
-          # Recompile every target object with Dotprod enabled. The already
-          # converted 128-bit model is also the correct layout for this build.
+          # Rebuild every target object with Dotprod enabled. The converter
+          # remains 128-bit because SDOT does not change the vector width.
           make clean
-          make -j2 ANDROID=true \
-            CC="$CC" CXX="$CXX" HOSTCXX="$HOSTCXX" HOSTOPT="$HOSTOPT" \
-            ARCH=armv8.2-a+dotprod EXE=prune-android-arm64-dotprod \
-            OPT="-O3 -flto -funroll-loops -mtune=cortex-a76 -fPIE" \
-            LDFLAGS="-pie"
-
-          cp prune-android-arm64-dotprod ../dist/
+          build_variant armv8.2-a+dotprod prune-android-arm64-dotprod ""
+          verify_embedded_object "$MODEL_SIZE" "$MAGICS_SIZE"
           verify_elf ../dist/prune-android-arm64-dotprod
 
-          echo "Checking that the optimized build actually contains SDOT..."
+          echo "Checking that the Dotprod executable contains SDOT..."
           "$OBJDUMP" -d ../dist/prune-android-arm64-dotprod |
             awk '/[[:space:]]sdot[[:space:]]/ { found=1 } END { exit !found }'
 
